@@ -1,0 +1,3 @@
+<launch>
+    <node pkg="internal_grid_map" type="grid_map_demo" name="grid_map_demo" args="" output="screen" />
+</launch>

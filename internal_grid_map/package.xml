@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<package format="2">
+    <name>internal_grid_map</name>
+    <version>0.0.1</version>
+    <description>internal_grid_map</description>
+    <author email="todo@todo.com">todo</author>
+    <maintainer email="todo@todo.com">todo</maintainer>
+    <!-- The export tag contains other, unspecified, tags -->
+
+    <!-- One license tag required, multiple allowed, one license per tag -->
+    <!-- Commonly used license strings: -->
+    <!--   BSD, MIT, Boost Software License, GPLv2, GPLv3, LGPLv2.1, LGPLv3 -->
+    <license>TBD</license>
+
+    <buildtool_depend>catkin</buildtool_depend>
+    <depend>roscpp</depend>
+    <depend>grid_map_core</depend>
+    <depend>grid_map_cv</depend>
+    <depend>grid_map_ros</depend>
+    <depend>grid_map_msgs</depend>
+    <depend>geometry_msgs</depend>
+    <depend>roslib</depend>
+    <depend>cv_bridge</depend>
+    <depend>nav_msgs</depend>
+    <depend>opt_utils</depend>
+</package>
