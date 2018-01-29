@@ -12,7 +12,7 @@
 #include <grid_map_core/grid_map_core.hpp>
 #include <grid_map_cv/grid_map_cv.hpp>
 #include <opencv2/core/eigen.hpp>
-#include "eigen2cv.hpp"
+#include "internal_grid_map/eigen2cv.hpp"
 namespace hmpl {
 /**
  * This class includes gridmap data and the method to calculate corresponding
@@ -70,6 +70,50 @@ class InternalGridMap {
      */
     bool updateDistanceLayerCV();
 
+    bool updateInflatedLayer(int inflation_radius_map_cells);
+
+    bool updateDeflatedLayer(int deflation_radius_map_cells);
+    /**
+     * add a exploration_transform layer to grid map, calculate and update
+     * explore transform of free cells from goal points using flood-fill algorithm
+     * @param goal_points
+     * @param lethal_dist min minimal safety distance  !use cell unit
+     * @param penalty_dist threshold value used to represent uncomfortableness  !use cell unit
+     * @return
+     */
+    bool updateExplorationTransform(const std::vector<grid_map::Index>& goal_points,
+                                    const float lethal_dist,
+                                    const float penalty_dist);
+    /**
+     * calculate explore transform value of free neighberhood cells of current cell,
+     * then push the vaild cells into flood-fill queue.
+     * dangerous_cost = penalty_dist - dist2obstacle
+     * explore transform value = curr_cost + travel_cost + dangerous_cost^2
+     * @param idx_x
+     * @param idx_y
+     * @param curr_val
+     * @param add_cost interval travel path cost  !use cell unit
+     * @param lethal_dist minimal distance to obstacle for updating explore  !use cell unit
+     * @param penalty_dist  !use cell unit
+     * @param point_queue
+     */
+    void touchExplorationCell(const int idx_x, const int idx_y, const float curr_val,
+                              const float add_cost, const float lethal_dist, const float penalty_dist,
+                              std::queue<grid_map::Index> &point_queue);
+
+    /**
+      *
+      * @param index
+      * @return
+      */
+    float getExplorationTFValue(const grid_map::Index& index) const;
+
+    /**
+     *
+     * @param pos
+     * @return
+     */
+    float getExplorationTFValue(const grid_map::Position& pos) const;
     /**
      *
      * @param index
@@ -91,7 +135,12 @@ class InternalGridMap {
     std::string obs;
     // distance map layer ID
     std::string dis;
-    //
+    // inflated map layer ID
+    std::string inflate;
+    // deflated map layer ID
+    std::string deflate;
+    // explore transform map layer ID
+    std::string explore_transform;
 
     /// The grid map container
     grid_map::GridMap maps;
