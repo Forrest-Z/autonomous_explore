@@ -10,11 +10,29 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/opencv.hpp>
 #include <queue>
+#include <algorithm>
+#include <utility>
 #include <grid_map_ros/grid_map_ros.hpp>
 #include <nav_msgs/Path.h>
 #include <opt_utils/opt_utils.hpp>
 
 namespace grid_map_path_planning{
+/**
+* find dense path using steepest ascend gradient method in
+* exploration transform map
+* @param grid_map
+* @param start_pose
+* @param path
+* @param occupancy_layer
+* @param dist_trans_layer used to decide whether to reserve this sampling cell
+* @param expl_trans_layer
+* @return
+*/
+bool findPathOfCompleteCoverage(grid_map::GridMap &grid_map, const hmpl::Pose2D &start_pose,
+                                std::vector<geometry_msgs::PoseStamped> &path,
+                                const std::string occupancy_layer = "occupancy",
+                                const std::string dist_trans_layer = "distance_transform",
+                                const std::string expl_trans_layer = "exploration_transform");
 /**
  * find dense path using steepest descent gradient method in
  * exploration transform map. then refine path by sampling rule
@@ -78,14 +96,17 @@ bool shortCutPath(grid_map::GridMap &grid_map, const std::vector<grid_map::Index
 void touchDistanceField(const grid_map::Matrix &dist_trans_map, const grid_map::Index &current_point, const int idx_x,
                    const int idx_y, float &highest_val, grid_map::Index &highest_index);
 
-// calculate ascending gradient value
+// calculate descending gradient value
 void touchGradientCell(const grid_map::Matrix &expl_trans_map, const grid_map::Index &current_point, const int idx_x,
                   const int idx_y, float &lowest_val, grid_map::Index &lowest_index);
+// calculate ascending gradient value
+void touchInverseGradientCell(const std::vector<std::pair<int, int> > &visited, const grid_map::Matrix &expl_trans_map, const grid_map::Index &current_point, const int idx_x,
+                              const int idx_y, float &lowest_val, grid_map::Index &lowest_index);
 // judge cell is whether close to obstacle cell or not
 // return false meaning that need to reserve this cell in result path
 bool shortCutValid(const grid_map::GridMap &grid_map, const grid_map::Matrix &dist_trans_map,
                    const grid_map::Index &start_point, const grid_map::Index &end_point);
-
+size_t size_x_lim, size_y_lim;
 } // namespace grid_map_path_planning
 
 #endif //PATH_TRANSFORM_PATH_PLANNING_HPP

@@ -111,7 +111,9 @@ bool InternalGridMap::updateDeflatedLayer( int deflation_radius_map_cells) {
 
 bool InternalGridMap::updateExplorationTransform(const std::vector<grid_map::Index>& goal_points,
                                                  const float lethal_dist,
-                                                 const float penalty_dist) {
+                                                 const float penalty_dist,
+                                                 float alpha,
+                                                 bool use_cell_danger) {
     if (!this->maps.exists(obs))
         return false;
 
@@ -134,7 +136,10 @@ bool InternalGridMap::updateExplorationTransform(const std::vector<grid_map::Ind
 
     float adjacent_dist = 1;
     float diagonal_dist = sqrt(2);
-
+    // don't consider discomfort
+    if(!use_cell_danger) {
+        alpha = 0;
+    }
     //std::cout << "pq size:" << point_queue.size() << "\n";
 
     while (point_queue.size()){
@@ -155,7 +160,8 @@ bool InternalGridMap::updateExplorationTransform(const std::vector<grid_map::Ind
                              diagonal_dist,
                              lethal_dist,
                              penalty_dist,
-                             point_queue);
+                             point_queue,
+                             alpha);
 
         touchExplorationCell(point(0),
                              point(1)-1,
@@ -163,7 +169,8 @@ bool InternalGridMap::updateExplorationTransform(const std::vector<grid_map::Ind
                              adjacent_dist,
                              lethal_dist,
                              penalty_dist,
-                             point_queue);
+                             point_queue,
+                             alpha);
 
         touchExplorationCell(point(0)+1,
                              point(1)-1,
@@ -171,7 +178,8 @@ bool InternalGridMap::updateExplorationTransform(const std::vector<grid_map::Ind
                              diagonal_dist,
                              lethal_dist,
                              penalty_dist,
-                             point_queue);
+                             point_queue,
+                             alpha);
 
         touchExplorationCell(point(0)-1,
                              point(1),
@@ -179,7 +187,8 @@ bool InternalGridMap::updateExplorationTransform(const std::vector<grid_map::Ind
                              adjacent_dist,
                              lethal_dist,
                              penalty_dist,
-                             point_queue);
+                             point_queue,
+                             alpha);
 
         touchExplorationCell(point(0)+1,
                              point(1),
@@ -187,7 +196,8 @@ bool InternalGridMap::updateExplorationTransform(const std::vector<grid_map::Ind
                              adjacent_dist,
                              lethal_dist,
                              penalty_dist,
-                             point_queue);
+                             point_queue,
+                             alpha);
 
         touchExplorationCell(point(0)-1,
                              point(1)+1,
@@ -195,7 +205,8 @@ bool InternalGridMap::updateExplorationTransform(const std::vector<grid_map::Ind
                              diagonal_dist,
                              lethal_dist,
                              penalty_dist,
-                             point_queue);
+                             point_queue,
+                             alpha);
 
         touchExplorationCell(point(0),
                              point(1)+1,
@@ -203,7 +214,8 @@ bool InternalGridMap::updateExplorationTransform(const std::vector<grid_map::Ind
                              adjacent_dist,
                              lethal_dist,
                              penalty_dist,
-                             point_queue);
+                             point_queue,
+                             alpha);
 
         touchExplorationCell(point(0)+1,
                              point(1)+1,
@@ -211,7 +223,8 @@ bool InternalGridMap::updateExplorationTransform(const std::vector<grid_map::Ind
                              diagonal_dist,
                              lethal_dist,
                              penalty_dist,
-                             point_queue);
+                             point_queue,
+                             alpha);
     }
     return true;
 
@@ -219,8 +232,8 @@ bool InternalGridMap::updateExplorationTransform(const std::vector<grid_map::Ind
 
 void InternalGridMap::touchExplorationCell(const int idx_x, const int idx_y, const float curr_val,
                                            const float add_cost, const float lethal_dist,
-                                           const float penalty_dist,
-                                           std::queue<grid_map::Index> &point_queue) {
+                                           const float penalty_dist, std::queue<grid_map::Index> &point_queue,
+                                           float p_alpha) {
 
     //If not free at cell, return right away
     if (this->maps[obs](idx_x, idx_y) != FREE)
@@ -235,7 +248,7 @@ void InternalGridMap::touchExplorationCell(const int idx_x, const int idx_y, con
 
     if (dist < penalty_dist){
         float add_cost = (penalty_dist - dist);
-        cost += add_cost * add_cost;
+        cost += p_alpha * add_cost * add_cost;
     }
 
     if (this->maps[explore_transform](idx_x, idx_y) > cost){

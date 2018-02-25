@@ -13,6 +13,8 @@
 #include <grid_map_cv/grid_map_cv.hpp>
 #include <opencv2/core/eigen.hpp>
 #include "internal_grid_map/eigen2cv.hpp"
+#include "internal_grid_map/exploration_transform_vis.h"
+
 namespace hmpl {
 /**
  * This class includes gridmap data and the method to calculate corresponding
@@ -83,7 +85,9 @@ class InternalGridMap {
      */
     bool updateExplorationTransform(const std::vector<grid_map::Index>& goal_points,
                                     const float lethal_dist,
-                                    const float penalty_dist);
+                                    const float penalty_dist,
+                                    float alpha,
+                                    bool use_cell_danger = true);
     /**
      * calculate explore transform value of free neighberhood cells of current cell,
      * then push the vaild cells into flood-fill queue.
@@ -96,10 +100,11 @@ class InternalGridMap {
      * @param lethal_dist minimal distance to obstacle for updating explore  !use cell unit
      * @param penalty_dist  !use cell unit
      * @param point_queue
+     * @param p_alpha factor of discomfort because of obstacles
      */
     void touchExplorationCell(const int idx_x, const int idx_y, const float curr_val,
                               const float add_cost, const float lethal_dist, const float penalty_dist,
-                              std::queue<grid_map::Index> &point_queue);
+                              std::queue<grid_map::Index> &point_queue,float p_alpha = 1.0);
 
     /**
       *
@@ -142,11 +147,15 @@ class InternalGridMap {
     // explore transform map layer ID
     std::string explore_transform;
 
+    // independent publisher class for showing explore transform gradient map
+    boost::shared_ptr<hmpl::ExplorationTransformVis> vis_;
+
     /// The grid map container
     grid_map::GridMap maps;
 
     unsigned char OCCUPY = 0;
     unsigned char FREE = 255;
+
 };
 
 }  // namespace internal_grid_map

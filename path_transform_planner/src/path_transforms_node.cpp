@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
         std::vector<grid_map::Index> tmp;
         tmp.push_back(goal_index);
         auto start = hmpl::now();
-        in_gm.updateExplorationTransform(tmp, 5, 10);
+        in_gm.updateExplorationTransform(tmp, 5, 10, 2, true);
         auto end = hmpl::now();
         std::cout << "explore cost time:" << hmpl::getDurationInSecs(start, end) << "\n";
         in_gm.vis_->publishVisOnDemand(in_gm.maps, in_gm.explore_transform);
@@ -113,6 +113,9 @@ int main(int argc, char **argv) {
         std::vector<geometry_msgs::PoseStamped> result_path;
         grid_map_path_planning::findPathExplorationTransform(in_gm.maps, revised_start_pose,
                                                              result_path,in_gm.obs, in_gm.dis, in_gm.explore_transform);
+//        grid_map_path_planning::findPathOfCompleteCoverage(in_gm.maps, revised_start_pose,
+//                                                           result_path,in_gm.obs, in_gm.dis, in_gm.explore_transform);
+
         end = hmpl::now();
         std::cout << "PT planner cost time:" << hmpl::getDurationInSecs(start, end) << "\n";
         if(!result_path.empty()) {

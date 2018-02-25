@@ -9,9 +9,6 @@
 #include <opencv2/opencv.hpp>
 #include <opt_utils/opt_utils.hpp>
 #include "internal_grid_map/internal_grid_map.hpp"
-#include <internal_grid_map/exploration_transform_vis.h>
-
-boost::shared_ptr<hmpl::ExplorationTransformVis> vis_;
 
 hmpl::Pose2D goal_point(14.8, -8.9, 0.28);
 grid_map::Index goal_index;
@@ -30,10 +27,9 @@ int main(int argc, char **argv) {
     ros::NodeHandle nh("~");
     ros::Publisher publisher =
             nh.advertise<nav_msgs::OccupancyGrid>("grid_map", 1, true);
-    vis_.reset(new hmpl::ExplorationTransformVis("exploration_transform"));
 
     std::string image_dir = ros::package::getPath("internal_grid_map");
-    image_dir.append("/data/obstacles.png");
+    image_dir.append("/data/test.jpg");
     cv::Mat image = cv::imread(image_dir, CV_8UC1);
     if (image.data == nullptr) {
         std::cout << "image file obstacles.png is not found. Please check your data." << std::endl;
@@ -45,6 +41,8 @@ int main(int argc, char **argv) {
     igm.initializeFromImage(image, map_resolution, grid_map::Position::Zero());
     igm.addObstacleLayerFromImage(image, 0.5);
     igm.maps.setFrameId("map");
+    igm.vis_.reset(new hmpl::ExplorationTransformVis("exploration_transform"));
+
 
     ROS_INFO("Created map with size %f x %f m (%i x %i cells).",
              igm.maps.getLength().x(), igm.maps.getLength().y(),
@@ -79,7 +77,7 @@ int main(int argc, char **argv) {
         start = hmpl::now();
         bool flag = igm.updateExplorationTransform(tmp, 5, 10);
         end = hmpl::now();
-        vis_->publishVisOnDemand(igm.maps, igm.explore_transform);
+        igm.vis_->publishVisOnDemand(igm.maps, igm.explore_transform);
         std::cout << "explore cost time:" << hmpl::getDurationInSecs(start, end) << "\n"
                   << "flag : " << flag  << '\n';
 
