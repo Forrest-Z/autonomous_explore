@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
         std::vector<grid_map::Index> tmp;
         tmp.push_back(goal_index);
         start = hmpl::now();
-        bool flag = igm.updateExplorationTransform(tmp, 5, 10);
+        bool flag = igm.updateExplorationTransform(tmp, 5, 10, 1.0);
         end = hmpl::now();
         igm.vis_->publishVisOnDemand(igm.maps, igm.explore_transform);
         std::cout << "explore cost time:" << hmpl::getDurationInSecs(start, end) << "\n"

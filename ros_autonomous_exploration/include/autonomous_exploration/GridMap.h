@@ -2,12 +2,15 @@
 #define GRID_MAP_H
 
 #include <cstdio>
+#include "boost/date_time/posix_time/posix_time.hpp"
+
 #include "ros/ros.h"
 #include "ros/console.h"
 #include "nav_msgs/OccupancyGrid.h"
 #include "tf/LinearMath/Matrix3x3.h"
 #include "geometry_msgs/Quaternion.h"
-#include "boost/date_time/posix_time/posix_time.hpp"
+#include <tf/transform_listener.h>
+
 
 using namespace tf;
 using namespace ros;
@@ -15,7 +18,7 @@ using namespace ros;
 typedef std::multimap<double, unsigned int> Queue;
 typedef std::pair<double, unsigned int> Entry;
 
-#define  LETHAL_OBSTACLE 100
+#define  LETHAL_OBSTACLE 70
 #define  NO_INFORMATION -1
 #define  FREE_SPACE 0
 
@@ -27,6 +30,18 @@ public:
 		world_frame_id_ = "/odom";
 		xinit_ = 0;
 		yinit_ = 0;
+    }
+
+	geometry_msgs::Pose current_pose_local;
+
+    inline double modifyTheta(double theta)
+    {
+        if (theta < 0)
+            return theta + 2 * M_PI;
+        if (theta >= 2 * M_PI)
+            return theta - 2 * M_PI;
+
+        return theta;
     }
 
 	void generateMap() {
@@ -87,39 +102,36 @@ public:
 
 	bool getCurrentPosition(unsigned int &index) 
 	{
-        TransformListener mTfListener_;
-	    try
-	    {
-		   	Time now = Time::now();
-		   	mTfListener_.waitForTransform(world_frame_id_,
-										  std::string("/base_link"),
-										  Time(0), Duration(5.0));
+        tf::TransformListener mTfListener;
+        tf::StampedTransform transform;
+        int temp = 0;
+        while (temp == 0) {
+			try {
+                temp = 1;
+                mTfListener.lookupTransform(world_frame_id_, std::string("/base_link"), ros::Time(0), transform);
+            } catch (tf::TransformException ex) {
+                temp = 0;
+                ros::Duration(0.1).sleep();
+                ROS_INFO("no tf tree is received!");
+            }
+        }
+        double x = transform.getOrigin().x() - xinit_;
+        double y = transform.getOrigin().y() - yinit_;
+        double w = modifyTheta(tf::getYaw(transform.getRotation()));
 
-	        tf::StampedTransform transform;
-		   	mTfListener_.lookupTransform(world_frame_id_,
-										 std::string("/base_link"),
-										 Time(0), transform);
+        unsigned int X = (x - getOriginX()) / getResolution();
+        unsigned int Y = (y - getOriginY()) / getResolution();
 
-	    	double x = transform.getOrigin().x() - xinit_;
-	    	double y = transform.getOrigin().y() - yinit_;
-	    	double w = tf::getYaw(transform.getRotation());
+        if(!getIndex(X, Y, index))
+        {
+            ROS_ERROR("Is the robot out of the map?");
+            return false;
+        }
+        current_pose_local.position.x = x;
+        current_pose_local.position.y = y;
+        tf::quaternionTFToMsg(transform.getRotation(), current_pose_local.orientation);
 
-	    	unsigned int X = (x - getOriginX()) / getResolution();
-	    	unsigned int Y = (y - getOriginY()) / getResolution();
-	
-	    	if(!getIndex(X, Y, index))
-	    	{
-		   		ROS_ERROR("Is the robot out of the map?");
-		   		return false;
-	    	}
-	    			
-			ROS_INFO("Robot's coordinates are %d, %d \n", X, Y);
-	    }
-	    catch(TransformException ex)
-	    {
-			ROS_ERROR("Could not get robot position: %s", ex.what());
-		   	return false;
-		}
+        ROS_INFO("Robot's coordinates are %d, %d \n", X, Y);
 
 	    return true;
     }
@@ -159,6 +171,7 @@ public:
         y = Y*getResolution() + getOriginY();
 		return true;
 	}
+    
 
 	void clearArea(unsigned int center) {
 		unsigned int xCenter;
@@ -236,8 +249,21 @@ public:
 
 	bool isFrontier(unsigned int index)
 	{
-		ROS_DEBUG("Map resolution: %f", getResolution());
-		return uFunction(index) > mGainConst;
+        if(1) {
+            ROS_DEBUG("Map resolution: %f", getResolution());
+            return uFunction(index) > mGainConst;
+        }
+        // todo index circle-limit , bfs/rrt-sampling frontier search
+//        if (getData(index) != NO_INFORMATION || frontier_flag[idx]) {
+//            return false;
+//        }
+//        BOOST_FOREACH(unsigned int nbr, nhood4(idx, size_x_, size_y_)) {
+//                        if (map_data_[nbr] == FREE_SPACE) {
+//                            return true;
+//                        }
+//                    }
+//        return false;
+
 	}
 
 	double uFunction(unsigned int index)
@@ -374,7 +400,7 @@ public:
 	}
 
 	const nav_msgs::OccupancyGrid& getMap() const { return mOccupancyGrid; }
-
+    geometry_msgs::Pose getCurrentLocalPosition() const {return current_pose_local;};
 	unsigned int getWidth() { return mMapWidth; }
 	unsigned int getHeight() { return mMapHeight; }
 	unsigned int getSize() { return mMapWidth * mMapHeight; }

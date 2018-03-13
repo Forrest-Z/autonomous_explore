@@ -379,11 +379,11 @@ bool MapBuilder::updateMap(const sensor_msgs::LaserScan& scan, long int dx, long
     {
       // The last point is the point with obstacle.
       const size_t last_pt = pts.back();
-      updatePointOccupancy(false, true, last_pt, map_.data, log_odds_);
+      updatePointOccupancy(true, true, last_pt, map_.data, log_odds_);
       pts.pop_back();
     }
     // The remaining points are in free space.
-    updatePointsOccupancy(false, false, pts, map_.data, log_odds_);
+    updatePointsOccupancy(true, false, pts, map_.data, log_odds_);
   }
   return has_moved;
 }

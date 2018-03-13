@@ -31,16 +31,12 @@ typedef std::vector<coordVector> regionVector;
 
 using namespace frontier_exploration;
 // global variables
-visualization_msgs::Marker points;
 nav_msgs::OccupancyGrid mapData;
 coordVector frontiers, frontiers_show;
-std::vector<float> rrt_frontier;
 regionVector regions;
 coordVector centroids;
-coordVector rrt_centroids;
 std::vector<float> current_pos;
 
-std::list<frontier_exploration::Frontier> seed_frontiers;
 
 int min_frontier_size;
 float min_frontier_dist;
@@ -77,91 +73,6 @@ void mapCallBack(const nav_msgs::OccupancyGrid::ConstPtr &msg) {
     mapData = *msg;
 }
 
-/*
-void timeCallback(const ros::TimerEvent &) {
-    auto start = hmpl::now();
-    regions.clear();
-    // merge
-    for (int i = 0; i < frontiers.size(); i++) {
-        coordVector region = {};
-        if (included(frontiers[i], regions) == false) {
-            //I proceed only if the current coord has not been already considered
-            region.push_back(frontiers[i]);
-            for (int j = i + 1; j < frontiers.size(); j++) {
-
-                for (int k = 0; k < region.size(); k++) {
-                    if (isOnSameFrontier(region[k], frontiers[j], min_frontier_dist)) {
-                        region.push_back(frontiers[j]);
-                        break;
-                    }
-                }
-            }
-            //doesn't consider the failed regions..... (not needed iterations)
-            if (region.size() >= min_frontier_size)
-                regions.push_back(region);
-
-        }
-
-    }
-//    auto end = hmpl::now();
-//    std::cout << "frontier merge  cost time:" << hmpl::getDurationInSecs(start, end) << "\n";
-
-    std::cout << "Frontier Points: " << frontiers.size() << '\n';
-    std::cout << "Frontier Regions: " << regions.size() << '\n';
-
-    // compute centroids
-    centroids.clear();
-    float min_distance = std::numeric_limits<float>::max();
-
-    for (int i = 0; i < regions.size(); i++) {
-        float accX = 0;
-        float accY = 0;
-        for (int j = 0; j < regions[i].size(); j++) {
-            accX += regions[i][j][0];
-            accY += regions[i][j][1];
-        }
-        float meanX = accX / regions[i].size();
-        float meanY = accY / regions[i].size();
-        std::vector<float> centroid;
-        centroid.push_back(meanX);
-        centroid.push_back(meanY);
-        centroids.push_back(centroid);
-
-        float distance = sqrt(pow(meanX-current_pos[0], 2)+pow(meanY-current_pos[1], 2));
-        if(distance < min_distance){
-            min_distance = distance;
-            nearest_centroid_index = centroids.size()-1;
-        }
-    }
-
-    std::cout << "centroids size: " << centroids.size() << '\n';
-    if(-1 != nearest_centroid_index) {
-        ROS_INFO("Closest centroid (x,y) map: index: %d, %f, %f \t (x,y) current pose: %f, %f  ", nearest_centroid_index, centroids[nearest_centroid_index][0],
-                 centroids[nearest_centroid_index][1], current_pos[0], current_pos[1]);
-    }
-
-    // replace frontier with centroids, lasting iteration
-    frontiers.clear();
-    frontiers = centroids;
-
-//    start = hmpl::now();
-//    // delete invaid centroids
-//    for(auto i = centroids.begin(); i != centroids.end(); ) {
-//        if((gridValue(mapData, *i) == 100) || (informationGain(mapData, *i, 1) < 3)) {
-//            i = centroids.erase(i);
-//        } else {
-//            ++i;
-//        }
-//    }
-//    end = hmpl::now();
-//    std::cout << "frontier fix  cost time:" << hmpl::getDurationInSecs(start, end) << "\n";
-//
-//    std::cout << "fixed centroids size: " << centroids.size() << '\n';
-
-    auto end = hmpl::now();
-    std::cout << "frontier merge  cost time:" << hmpl::getDurationInSecs(start, end) << "\n";
-
-}*/
 
 //Subscribers callback functions---------------------------------------
 void goalpointCallBack(const geometry_msgs::PointStampedConstPtr & msg) {
@@ -172,23 +83,21 @@ void goalpointCallBack(const geometry_msgs::PointStampedConstPtr & msg) {
     coord.push_back(x);
     coord.push_back(y);
     frontiers.push_back(coord);
-    rrt_frontier = coord;
-
 }
-
 
 
 int main(int argc, char **argv) {
     ros::init(argc, argv, "filter");
     ros::NodeHandle nh;
 
-    std::string  map_topic, base_frame_topic, goals_topic;
+    std::string  map_topic, base_frame_topic, goals_topic, base_link_topic;
     int rates;
     std::string ns;
     ns = ros::this_node::getName();
     ros::param::param<int>(ns + "/min_frontier_size", min_frontier_size, 1);
     ros::param::param<float>(ns + "/min_frontier_dist", min_frontier_dist, 2);
-    ros::param::param<std::string>(ns + "/map_topic", map_topic, "/local_map/local_map");
+    ros::param::param<std::string>(ns + "/map_topic", map_topic, "/global_map");
+    ros::param::param<std::string>(ns + "/base_link", base_link_topic, "/base_link");
     ros::param::param<std::string>(ns + "/robot_frame", base_frame_topic, "/odom");
     ros::param::param<std::string>(ns + "/goals_topic", goals_topic, "/detected_points");
     ros::param::param<int>(ns + "/rate", rates, 100);
@@ -201,9 +110,6 @@ int main(int argc, char **argv) {
     ros::Publisher centroids_pub = nh.advertise<visualization_msgs::MarkerArray>(ns +"/centroids", 10);
     ros::Publisher filteredpoint_pub = nh.advertise<geometry_msgs::PoseArray>("filtered_points", 10);
 
-    ros::Publisher frontier_cloud_pub = nh.advertise<sensor_msgs::PointCloud2>("rrt_frontiers",5);
-
-//    ros::Timer timer = nh.createTimer(ros::Duration(0.5), timeCallback);
     ros::Rate rate(rates);
 
     frontiers.clear();
@@ -226,7 +132,7 @@ int main(int argc, char **argv) {
     while (temp == 0) {
         try {
             temp = 1;
-            listener.lookupTransform(map_topic, base_frame_topic, ros::Time(0), transform);
+            listener.lookupTransform(base_frame_topic, base_link_topic, ros::Time(0), transform);
         } catch (tf::TransformException ex) {
             temp = 0;
             ros::Duration(0.1).sleep();
@@ -237,23 +143,6 @@ int main(int argc, char **argv) {
     current_pos.push_back(0);
     current_pos.push_back(0);
 
-    //visualizations  points and lines..
-    points.header.frame_id = mapData.header.frame_id;
-    points.header.stamp = ros::Time::now();
-    points.ns  = "markers2";
-    points.id = 0;
-    points.type = visualization_msgs::Marker::POINTS;
-//Set the marker action.  Options are ADD, DELETE, and new in ROS Indigo: 3 (DELETEALL)
-    points.action = visualization_msgs::Marker::ADD;
-    points.pose.orientation.w = 1.0;
-    points.scale.x = 0.6;
-    points.scale.y = 0.6;
-    points.color.r = 255.0 / 255.0;
-    points.color.g = 255.0 / 255.0;
-    points.color.b = 0.0 / 255.0;
-    points.color.a = 0.5;
-    points.lifetime = ros::Duration();
-
     // Main loop
     while (ros::ok()) {
         ros::spinOnce();
@@ -263,7 +152,7 @@ int main(int argc, char **argv) {
         while (temp == 0) {
             try {
                 temp = 1;
-                listener.lookupTransform(map_topic, base_frame_topic, ros::Time(0), transform);
+                listener.lookupTransform(base_frame_topic, base_link_topic, ros::Time(0), transform);
             } catch (tf::TransformException ex) {
                 temp = 0;
                 ros::Duration(0.1).sleep();
@@ -272,8 +161,8 @@ int main(int argc, char **argv) {
 
         // update position
         current_pos.clear();
-        current_pos.push_back(xinit_ - transform.getOrigin().x());
-        current_pos.push_back(yinit_ - transform.getOrigin().y());
+        current_pos.push_back( transform.getOrigin().x() - xinit_);
+        current_pos.push_back( transform.getOrigin().y() - yinit_);
 
 
         auto start = hmpl::now();
@@ -296,9 +185,7 @@ int main(int argc, char **argv) {
                 //doesn't consider the failed regions..... (not needed iterations)
                 if (region.size() >= min_frontier_size)
                     regions.push_back(region);
-
             }
-
         }
 //    auto end = hmpl::now();
 //    std::cout << "frontier merge  cost time:" << hmpl::getDurationInSecs(start, end) << "\n";
@@ -325,7 +212,7 @@ int main(int argc, char **argv) {
             centroids.push_back(centroid);
 
             float distance = sqrt(pow(meanX-current_pos[0], 2)+pow(meanY-current_pos[1], 2));
-            if(distance < min_distance){
+            if(distance < min_distance && distance > 5){
                 min_distance = distance;
                 nearest_centroid_index = centroids.size()-1;
             }
@@ -342,7 +229,7 @@ int main(int argc, char **argv) {
 //    start = hmpl::now();
     // delete invaid centroids
         for(auto i = centroids.begin(); i != centroids.end(); ) {
-            if((gridValue(mapData, *i) == 100) || (informationGain(mapData, *i, 1) < 3)) {
+            if(!isFree(mapData, *i, 2.0)|| (informationGain(mapData, *i, 1) < 30)) {
                 i = centroids.erase(i);
             } else {
                 ++i;
@@ -362,78 +249,24 @@ int main(int argc, char **argv) {
         auto end = hmpl::now();
         std::cout << "frontier merge cost time:" << hmpl::getDurationInSecs(start, end) << "\n";
 
-/*
-        // seed search frontiers
-        auto start = hmpl::now();
-        std::list<frontier_exploration::Frontier> frontier_list = searchfrom.searchFrom(rrt_frontier);
-        auto end = hmpl::now();
-        std::cout << "frontier seed-search find number : "<< frontier_list.size()
-                  << "  and cost time: " << hmpl::getDurationInSecs(start, end) <<'\n';
-
-        //create placeholder for selected frontier
-        Frontier selected;
-        selected.min_distance = std::numeric_limits<double>::infinity();
-        int max;
-        //pointcloud for visualization purposes
-        pcl::PointCloud<pcl::PointXYZI> frontier_cloud_viz;
-        pcl::PointXYZI frontier_point_viz(50);
-
-
-        // delete invaid rrt_frontier_centroid
-        for(auto i = rrt_centroids.begin(); i != rrt_centroids.end(); ) {
-            if(gridValue(mapData, *i) == 100 || informationGain(mapData, *i, 1) < 3) {
-                i = rrt_centroids.erase(i);
-            } else {
-                ++i;
-            }
-        }
-
-        if(frontier_list.size() > 0) {
-            BOOST_FOREACH(Frontier frontier, frontier_list) {
-                //load frontier into visualization poitncloud
-                float x = frontier.centroid.x;
-                float y = frontier.centroid.y;
-                std::vector<float> coord;
-                coord.push_back(x);
-                coord.push_back(y);
-                for(auto i = rrt_centroids.begin(); i != rrt_centroids.end(); ) {
-                    if (isOnSameFrontier( *i, coord, min_frontier_dist)) {
-                        float meanX = ((*i)[0] + x) / 2;
-                        float meanY = ((*i)[1] + y) / 2;
-                        (*i)[0] = meanX;
-                        (*i)[1] = meanY;
-                        break;
-                    }
-                    ++i;
-                }
-                rrt_centroids.push_back(coord);
-                 // for show
-                frontier_point_viz.x = x;
-                frontier_point_viz.y = y;
-                frontier_cloud_viz.push_back(frontier_point_viz);
-
-                //check if this frontier is the nearest to robot
-                if (frontier.min_distance < selected.min_distance){
-                    selected = frontier;
-                    max = rrt_centroids.size()-1;
-                }
-            }
-            std::cout << "centroids seed-search find number : "<< rrt_centroids.size() <<'\n';
-        }
-
-
-        //color selected frontier
-        frontier_cloud_viz[max].intensity = 100;
-        //publish visualization point cloud
-        sensor_msgs::PointCloud2 frontier_viz_output;
-        pcl::toROSMsg(frontier_cloud_viz,frontier_viz_output);
-        frontier_viz_output.header.frame_id =mapData.header.frame_id;
-        frontier_viz_output.header.stamp = ros::Time::now();
-        frontier_cloud_pub.publish(frontier_viz_output);
-
-*/
-
         // publishing
+        //visualizations  points and lines..
+        visualization_msgs::Marker points;
+        points.header.frame_id = mapData.header.frame_id;
+        points.header.stamp = ros::Time(0);
+        points.ns  = "markers2";
+        points.id = 0;
+        points.type = visualization_msgs::Marker::POINTS;
+//Set the marker action.  Options are ADD, DELETE, and new in ROS Indigo: 3 (DELETEALL)
+        points.action = visualization_msgs::Marker::ADD;
+        points.pose.orientation.w = 1.0;
+        points.scale.x = 0.6;
+        points.scale.y = 0.6;
+        points.color.r = 255.0 / 255.0;
+        points.color.g = 255.0 / 255.0;
+        points.color.b = 0.0 / 255.0;
+        points.color.a = 0.5;
+        points.lifetime = ros::Duration();
         for(int i = 0; i < frontiers_show.size(); i++) {
             geometry_msgs::Point p;
             p.x =  frontiers_show[i][0];
@@ -442,7 +275,6 @@ int main(int argc, char **argv) {
             points.points.push_back(p);
         }
         frontiers_pub.publish(points);
-        points.points.clear();
 
         visualization_msgs::MarkerArray markersMsg;
         geometry_msgs::PoseArray filtered_points;

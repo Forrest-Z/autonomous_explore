@@ -87,6 +87,33 @@ int gridValue(nav_msgs::OccupancyGrid &mapData, std::vector<float> Xp) {
     return out;
 }
 
+bool isFree(nav_msgs::OccupancyGrid &mapData, std::vector<float> Xp, float r) {
+    float resolution = mapData.info.resolution;
+    float Xstartx = mapData.info.origin.position.x;
+    float Xstarty = mapData.info.origin.position.y;
+    int width = mapData.info.width;
+    std::vector<signed char> Data = mapData.data;
+
+    float vx[2], vy[2];
+    int xCenter = Xp[0] , yCenter = Xp[1];
+    for(float x = xCenter - r; x <= xCenter; x += resolution)
+        for(float y = yCenter - r; y <= yCenter; y += resolution) {
+            vx[0] = x ;
+            vy[0] = y ;
+            vx[1] = xCenter - (x - xCenter);
+            vy[1] = yCenter - (y - yCenter);
+            for(int i = 0; i < 2; ++i)
+                for(int j = 0; j < 2; ++j) {
+                    float indx = (floor((vy[i] - Xstarty) / resolution) * width) +
+                            (floor((vx[i] - Xstartx) / resolution));
+                    if(Data[int(indx)] == LETHAL_OBSTACLE) {
+                        return false;
+                    }
+                }
+        }
+    return  true;
+}
+
 
 
 
@@ -126,15 +153,17 @@ char ObstacleFree(std::vector<float> xnear, std::vector<float> &xnew, nav_msgs::
 }
 
 
-int informationGain(nav_msgs::OccupancyGrid &mapData, std::vector<float> point, int radius) {
+float informationGain(nav_msgs::OccupancyGrid &mapData, std::vector<float> point, int radius) {
     float resolution = mapData.info.resolution;
     float Xstartx = mapData.info.origin.position.x;
     float Xstarty = mapData.info.origin.position.y;
 
     float width = mapData.info.width;
     std::vector<signed char> Data = mapData.data;
+    int all_cells , use_cells;
+    all_cells = use_cells = 0;
 
-    int infoGain = 0;
+    float infoGain = 0.0;
     radius = int (radius / resolution);
     for(int i = -radius; i < radius + 1; i++) {
         for(int j = -radius; j < radius + 1; j++) {
@@ -142,15 +171,17 @@ int informationGain(nav_msgs::OccupancyGrid &mapData, std::vector<float> point, 
                     point[1] + j*resolution < Xstarty || point[1] + j*resolution > -Xstarty) {
                 ;
             } else {
+                all_cells ++;
                 std::vector<float> temppoint;
                 temppoint.push_back(point[0]+ i*resolution);
                 temppoint.push_back(point[1]+ j*resolution);
-                if(gridValue(mapData, temppoint) == -1) {
-                    infoGain++;
+                if(gridValue(mapData, temppoint) == NO_INFORMATION) {
+                    use_cells++;
                 }
             }
         }
     }
+    infoGain = 100.0 * use_cells / (all_cells * 1.0);
     return  infoGain;
 }
 

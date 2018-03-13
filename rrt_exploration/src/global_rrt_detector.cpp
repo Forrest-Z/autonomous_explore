@@ -46,7 +46,7 @@ int main(int argc, char **argv) {
     ns = ros::this_node::getName();
 
     ros::param::param<float>(ns + "/eta", eta, 0.5);
-    ros::param::param<std::string>(ns + "/map_topic", map_topic, "/local_map/local_map");
+    ros::param::param<std::string>(ns + "/map_topic", map_topic, "/global_map");
 //---------------------------------------------------------------
     ros::Subscriber sub = nh.subscribe(map_topic, 100, mapCallBack);
 

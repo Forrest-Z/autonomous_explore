@@ -22,7 +22,7 @@
 nav_msgs::OccupancyGrid mapData;
 geometry_msgs::PointStamped clickedpoint;
 geometry_msgs::PointStamped exploration_goal;
-visualization_msgs::Marker points, line ;
+visualization_msgs::Marker points, line;
 
 
 //Subscribers callback functions---------------------------------------
@@ -39,20 +39,23 @@ int main(int argc, char **argv) {
 
     // fetching all parameters
     float eta;
-    std::string map_topic, base_frame_topic;
+    std::string map_topic, base_frame_topic, base_link_topic;
 
     std::string ns;
     ns = ros::this_node::getName();
 
     ros::param::param<float>(ns + "/eta", eta, 2);
-    ros::param::param<std::string>(ns + "/map_topic", map_topic, "/local_map/local_map");
+    ros::param::param<std::string>(ns + "/map_topic", map_topic, "/global_map");
     ros::param::param<std::string>(ns + "/robot_frame", base_frame_topic, "/odom");
+    ros::param::param<std::string>(ns + "/base_link", base_link_topic, "/base_link");
+
 //---------------------------------------------------------------
     ros::Subscriber sub = nh.subscribe(map_topic, 100, mapCallBack);
 
     ros::Publisher targetspub = nh.advertise<geometry_msgs::PointStamped>("/detected_points", 10);
     ros::Publisher pub = nh.advertise<visualization_msgs::Marker>(ns + "_shapes", 10);
-    ros::Publisher current_pos_pub = nh.advertise<visualization_msgs::Marker>("/current_pos", 10);
+    ros::Publisher pos_marker_pub = nh.advertise<visualization_msgs::Marker>(ns + "_current_pos_marker", 10);
+    ros::Publisher current_pos_pub = nh.advertise<geometry_msgs::PoseStamped>("/current_pos", 10);
 
     ros::Rate rate(100);
 
@@ -69,7 +72,7 @@ int main(int argc, char **argv) {
     points.header.stamp = ros::Time(0);
     line.header.stamp = ros::Time(0);
 
-    points.ns = line.ns = "markers";
+    points.ns = line.ns = "rrt_local_markers";
     points.id = 0;
     line.id = 1;
 
@@ -136,14 +139,14 @@ int main(int argc, char **argv) {
     while (temp == 0) {
         try {
             temp = 1;
-            listener.lookupTransform(base_frame_topic, map_topic, ros::Time(0), transform);
+            listener.lookupTransform(base_frame_topic, base_link_topic, ros::Time(0), transform);
         } catch (tf::TransformException ex) {
             temp = 0;
             ros::Duration(0.1).sleep();
         }
     }
-    double xinit_ =  transform.getOrigin().x();
-    double yinit_ =  transform.getOrigin().y();
+    double xinit_ = transform.getOrigin().x();
+    double yinit_ = transform.getOrigin().y();
 
     geometry_msgs::Point p;
     float Xstartx = 0;
@@ -158,7 +161,7 @@ int main(int argc, char **argv) {
         while (temp == 0) {
             try {
                 temp = 1;
-                listener.lookupTransform(map_topic, base_frame_topic, ros::Time(0), transform);
+                listener.lookupTransform(base_frame_topic, base_link_topic, ros::Time(0), transform);
             } catch (tf::TransformException ex) {
                 temp = 0;
                 ros::Duration(0.1).sleep();
@@ -167,6 +170,7 @@ int main(int argc, char **argv) {
 
         float x = transform.getOrigin().x() - xinit_;
         float y = transform.getOrigin().y() - yinit_;
+        double yaw = tf::getYaw(transform.getRotation());
 
         current_pos.clear();
         current_pos.push_back(x);
@@ -177,8 +181,19 @@ int main(int argc, char **argv) {
         p.z = 0.0;
 
         marker.points.push_back(p);
-        current_pos_pub.publish(marker);
+        pos_marker_pub.publish(marker);
         marker.points.clear();
+
+        // publisher current pose
+        geometry_msgs::PoseStamped current_pose;
+        current_pose.header.frame_id = mapData.header.frame_id;
+        current_pose.header.stamp = ros::Time();
+        current_pose.pose.position.x = current_pos[0];
+        current_pose.pose.position.y = current_pos[1];
+        tf::Quaternion q;
+        q = transform.getRotation();
+        tf::quaternionTFToMsg(q, current_pose.pose.orientation);
+        current_pos_pub.publish(current_pose);
 
 // Sample free
         x_rand.clear();

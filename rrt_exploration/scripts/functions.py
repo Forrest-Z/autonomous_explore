@@ -8,7 +8,7 @@ from geometry_msgs.msg import PoseStamped
 from numpy import floor
 from numpy.linalg import norm
 from numpy import inf
-
+from math import atan2, pi
 
 # ________________________________________________________________________________
 class robot:
@@ -97,6 +97,34 @@ def point_of_index(mapData, i):
 
 # ________________________________________________________________________________
 
+def getYawToUnknown(mapData, point, r):
+    temp = []
+    revenue_record = []
+    resolution = mapData.info.resolution
+    for i in range(-1, 2, 1):
+        for j in range(-1, 2, 1):
+            adj = array([point[0] + i*resolution, point[1] + j*resolution])
+            index = index_of_point(mapData, point)
+            if index < len(mapData.data):
+                temp.append(adj)
+    del temp[4]
+    for n in range(0, len(temp)):
+        revenue = informationGain(mapData, temp[n], r)
+        revenue_record.append(revenue)
+    winner_id = revenue_record.index(max(revenue_record))
+    next_x = temp[winner_id][0]
+    next_y = temp[winner_id][1]
+    x = next_x - point[0]
+    y = next_y - point[1]
+    yaw = atan2(y, x)
+    if yaw < 0:
+        yaw += 2 * pi
+    return yaw
+
+
+
+# ________________________________________________________________________________
+
 def informationGain(mapData, point, r):
     infoGain = 0;
     index = index_of_point(mapData, point)
@@ -111,6 +139,9 @@ def informationGain(mapData, point, r):
                 if (mapData.data[i] == -1 and norm(array(point) - point_of_index(mapData, i)) <= r):
                     infoGain += 1
     return infoGain * (mapData.info.resolution ** 2)
+
+
+
 
 
 # ________________________________________________________________________________
@@ -157,7 +188,7 @@ def unvalid(mapData, pt):
         limit = ((start / mapData.info.width) + 2) * mapData.info.width
         for i in range(start, end + 1):
             if (i >= 0 and i < limit and i < len(mapData.data)):
-                if (mapData.data[i] == 1):
+                if (mapData.data[i] == 100):
                     return True
     return False
 

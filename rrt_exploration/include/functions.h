@@ -37,10 +37,13 @@ std::vector<float> Steer(  std::vector<float>, std::vector<float>, float );
 //gridValue function prototype
 int gridValue(nav_msgs::OccupancyGrid &,std::vector<float>);
 
+// free if no obstacle in r-circle
+bool isFree(nav_msgs::OccupancyGrid &mapData, std::vector<float> Xp, float r);
+
 //ObstacleFree function prototype
 char ObstacleFree(std::vector<float> , std::vector<float> & , nav_msgs::OccupancyGrid);
 
 // compute infomation gain value
-int informationGain(nav_msgs::OccupancyGrid &mapData, std::vector<float> point, int radius);
+float informationGain(nav_msgs::OccupancyGrid &mapData, std::vector<float> point, int radius);
 
 #endif

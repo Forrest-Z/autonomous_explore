@@ -4,7 +4,7 @@
 <launch>
 <arg name="eta" value="2.0"/>
 <arg name="Geta" value="15.0"/>
-<arg name="map_topic" value="/local_map/local_map"/>
+<arg name="map_topic" value="/global_map"/>
 
   <!--
   <node pkg="rrt_exploration" type="global_rrt_detector" name="global_detector" output="screen">
@@ -33,7 +33,7 @@
   </node>
 
   <node pkg="rrt_exploration" type="another_assigner.py" name="assigner" output="screen">
-  <param name="map_topic" value="/robot_1/map"/>
+  <param name="map_topic" value="$(arg map_topic)"/>
   <param name="info_radius" value="1"/>
   <param name="info_multiplier" value="3.0"/>
   <param name="hysteresis_radius" value="10.0"/>

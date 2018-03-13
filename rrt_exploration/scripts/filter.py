@@ -9,7 +9,7 @@ from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import PointStamped
 import tf
 from numpy import array, vstack, delete
-from functions import gridValue, informationGain
+from functions import gridValue, informationGain, unvalid
 from sklearn.cluster import MeanShift
 from geometry_msgs.msg import PoseArray
 from geometry_msgs.msg import Pose
@@ -38,12 +38,6 @@ def mapCallBack(data):
     mapData = data
 
 
-def globalMap(data):
-    global global1, globalmaps
-    global1 = data
-    indx = int(data._connection_header['topic'][7]) - 1
-    globalmaps[indx] = data
-
 
 # Node----------------------------------------------
 def node():
@@ -51,7 +45,7 @@ def node():
     rospy.init_node('filter', anonymous=False)
 
     # fetching all parameters
-    map_topic = rospy.get_param('~map_topic', '/local_map/local_map')
+    map_topic = rospy.get_param('~map_topic', '/global_map')
     threshold = rospy.get_param('~costmap_clearing_threshold', 70)
     info_radius = rospy.get_param('~info_radius',
                                   1.0)  # this can be smaller than the laser scanner range, >> smaller >>less computation time>> too small is not good, info gain won't be accurate
@@ -65,12 +59,8 @@ def node():
 
     # ---------------------------------------------------------------------------------------------------------------
 
-
     for i in range(0, n_robots):
         globalmaps.append(OccupancyGrid())
-
-    # for i in range(0, n_robots):
-    #     rospy.Subscriber('/local_map/local_map', OccupancyGrid, globalMap)
 
     # wait if map is not received yet
     while (len(mapData.data) < 1):
@@ -99,67 +89,14 @@ def node():
     while len(frontiers) < 1:
         pass
 
-    points = Marker()
-    points_clust = Marker()
-    # Set the frame ID and timestamp.  See the TF tutorials for information on these.
-    points.header.frame_id = mapData.header.frame_id
-    points.header.stamp = rospy.Time.now()
-
-    points.ns = "markers2"
-    points.id = 0
-
-    points.type = Marker.POINTS
-
-    # Set the marker action for latched frontiers.  Options are ADD, DELETE, and new in ROS Indigo: 3 (DELETEALL)
-    points.action = Marker.ADD;
-
-    points.pose.orientation.w = 1.0
-
-    points.scale.x = 0.6
-    points.scale.y = 0.6
-
-    points.color.r = 255.0 / 255.0
-    points.color.g = 255.0 / 255.0
-    points.color.b = 0.0 / 255.0
-
-    points.color.a = 1;
-    points.lifetime = rospy.Duration();
-
-    p = Point()
-
-    p.z = 0;
-
-    pp = []
-    pl = []
-
-    points_clust.header.frame_id = mapData.header.frame_id
-    points_clust.header.stamp = rospy.Time.now()
-
-    points_clust.ns = "markers3"
-    points_clust.id = 4
-
-    points_clust.type = Marker.POINTS
-
-    # Set the marker action for centroids.  Options are ADD, DELETE, and new in ROS Indigo: 3 (DELETEALL)
-    points_clust.action = Marker.ADD;
-
-    points_clust.pose.orientation.w = 1.0;
-
-    points_clust.scale.x = 0.8;
-    points_clust.scale.y = 0.8;
-    points_clust.color.r = 0.0 / 255.0
-    points_clust.color.g = 255.0 / 255.0
-    points_clust.color.b = 0.0 / 255.0
-
-    points_clust.color.a = 1;
-    points_clust.lifetime = rospy.Duration();
-
     temppoint = PointStamped()
     temppoint.header.frame_id = mapData.header.frame_id
     temppoint.header.stamp = rospy.Time(0)
     temppoint.point.z = 0.0
 
     arraypoints = PoseArray()
+    arraypoints.header.frame_id = mapData.header.frame_id
+    arraypoints.header.stamp = rospy.Time(0)
     tempPoint = Pose()
     tempPoint.position.z = 0.0
     # -------------------------------------------------------------------------
@@ -171,7 +108,7 @@ def node():
         centroids = []
         front = copy(frontiers)
         if len(front) > 1:
-            ms = MeanShift(bandwidth=1)
+            ms = MeanShift(bandwidth=2)
             ms.fit(front)
             centroids = ms.cluster_centers_  # centroids array is the centers of each cluster
 
@@ -181,7 +118,6 @@ def node():
         # frontiers = copy(centroids)
         # -------------------------------------------------------------------------
         # clearing old frontiers
-
         z = 0
         while z < len(centroids):
             cond = False
@@ -193,7 +129,7 @@ def node():
                 # x = array([transformedPoint.point.x, transformedPoint.point.y])
                 # cond = (gridValue(globalmaps[i], x) > threshold) or cond
                 x = [centroids[z][0], centroids[z][1]]
-                cond = (gridValue(mapData, x) > threshold) or cond
+                cond = unvalid(mapData, x) or cond
 
             if (cond or (informationGain(mapData, [centroids[z][0], centroids[z][1]], info_radius * 0.5)) < 0.2):
                 centroids = delete(centroids, (z), axis=0)
@@ -211,17 +147,66 @@ def node():
             # warn : must use deep copy
             arraypoints.poses.append(deepcopy(tempPoint))
         filterpub.publish(arraypoints)
+
+        # markers settings
+        points = Marker()
+        points_clust = Marker()
+        # Set the frame ID and timestamp.  See the TF tutorials for information on these.
+        points.header.frame_id = mapData.header.frame_id
+        points.header.stamp = rospy.Time(0)
+
+        points.ns = "markers2"
+        points.id = 0
+
+        points.type = Marker.POINTS
+
+        # Set the marker action for latched frontiers.  Options are ADD, DELETE, and new in ROS Indigo: 3 (DELETEALL)
+        points.action = Marker.ADD;
+
+        points.pose.orientation.w = 1.0
+
+        points.scale.x = 0.6
+        points.scale.y = 0.6
+
+        points.color.r = 255.0 / 255.0
+        points.color.g = 255.0 / 255.0
+        points.color.b = 0.0 / 255.0
+
+        points.color.a = 1;
+        points.lifetime = rospy.Duration();
+
+        points_clust.header.frame_id = mapData.header.frame_id
+        points_clust.header.stamp = rospy.Time.now()
+
+        points_clust.ns = "markers3"
+        points_clust.id = 4
+
+        points_clust.type = Marker.POINTS
+
+        # Set the marker action for centroids.  Options are ADD, DELETE, and new in ROS Indigo: 3 (DELETEALL)
+        points_clust.action = Marker.ADD;
+        points_clust.pose.orientation.w = 1.0;
+        points_clust.scale.x = 0.8;
+        points_clust.scale.y = 0.8;
+        points_clust.color.r = 0.0 / 255.0
+        points_clust.color.g = 255.0 / 255.0
+        points_clust.color.b = 0.0 / 255.0
+        points_clust.color.a = 1;
+        points_clust.lifetime = rospy.Duration();
         pp = []
+        p = Point()
+        p.z = 0;
+
         for q in range(0, len(frontiers)):
             p.x = frontiers[q][0]
             p.y = frontiers[q][1]
-            pp.append(copy(p))
+            pp.append(deepcopy(p))
         points.points = pp
         pp = []
         for q in range(0, len(centroids)):
             p.x = centroids[q][0]
             p.y = centroids[q][1]
-            pp.append(copy(p))
+            pp.append(deepcopy(p))
         points_clust.points = pp
 
         pub.publish(points)

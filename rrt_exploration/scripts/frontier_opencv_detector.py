@@ -22,7 +22,7 @@ def mapCallBack(data):
 def node():
     global mapData
     rospy.init_node('detector', anonymous=False)
-    map_topic = rospy.get_param('~map_topic', '/local_map/local_map')
+    map_topic = rospy.get_param('~map_topic', '/global_map')
     rospy.Subscriber(map_topic, OccupancyGrid, mapCallBack)
     targetspub = rospy.Publisher('detected_points', PointStamped, queue_size=10)
     pub = rospy.Publisher('shapes', Marker, queue_size=10)

@@ -86,7 +86,7 @@ class InternalGridMap {
     bool updateExplorationTransform(const std::vector<grid_map::Index>& goal_points,
                                     const float lethal_dist,
                                     const float penalty_dist,
-                                    float alpha,
+                                    float alpha = 1.0,
                                     bool use_cell_danger = true);
     /**
      * calculate explore transform value of free neighberhood cells of current cell,

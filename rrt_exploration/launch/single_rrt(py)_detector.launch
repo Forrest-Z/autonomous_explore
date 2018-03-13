@@ -4,7 +4,7 @@
 <launch>
 <arg name="eta" value="2.0"/>
 <arg name="Geta" value="15.0"/>
-<arg name="map_topic" value="/local_map/local_map"/>
+<arg name="map_topic" value="/global_map"/>
 
 
   <node pkg="rrt_exploration" type="global_rrt_detector" name="global_detector" output="screen">
@@ -21,7 +21,7 @@
   <node pkg="rrt_exploration" type="filter.py" name="filter" output="screen">
   <param name="map_topic" value="$(arg map_topic)"/>
   <param name="info_radius" value="1"/> 
-  <param name="costmap_clearing_threshold" value="100"/>
+  <param name="costmap_clearing_threshold" value="70"/>
   <param name="goals_topic" value="/detected_points"/> 
   <param name="n_robots" value="1"/>
   <param name="rate" value="100"/>
@@ -32,7 +32,7 @@
   <param name="map_topic" value="$(arg map_topic)"/>
   <param name="info_radius" value="1"/> 
   <param name="info_multiplier" value="3.0"/> 
-  <param name="hysteresis_radius" value="10.0"/>
+  <param name="hysteresis_radius" value="20.0"/>
   <param name="hysteresis_gain" value="2.0"/> 
   <param name="frontiers_topic" value="/filtered_points"/> 
   <param name="n_robots" value="1"/>
