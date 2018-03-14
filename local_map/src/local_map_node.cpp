@@ -10,6 +10,7 @@
  * - map_height, float, 200, map pixel height (y-direction)
  * - map_resolution, float, 0.020, map resolution (m/pixel)
  */
+#include <chrono>
 
 #include <ros/ros.h>
 #include <tf/transform_broadcaster.h>
@@ -18,17 +19,17 @@
 
 #include <local_map/map_builder.h>
 #include <local_map/SaveMap.h>
-#include <opt_utils/opt_utils.hpp>
 
 ros::Publisher map_publisher;
 local_map::MapBuilder* map_builder_ptr;
 
 void handleLaserScan(sensor_msgs::LaserScan msg)
 {
-  auto start = hmpl::now();
+  auto start = std::chrono::system_clock::now();
   map_builder_ptr->grow(msg);
-  auto end = hmpl::now();
-  std::cout << "update map cost time:" << hmpl::getDurationInSecs(start, end) << "\n";
+  auto end = std::chrono::system_clock::now();
+  auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+  std::cout << "update map cost time msec :" << msec << "\n";
   map_publisher.publish(map_builder_ptr->getMap());
 }
 

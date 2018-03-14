@@ -364,10 +364,20 @@ bool MapBuilder::updateMap(const sensor_msgs::LaserScan& scan, long int dx, long
     vector<size_t> pts;
     bool obstacle_in_map = getRayCastToObstacle(map_, angle, scan.ranges[i], pts);
     // add by zwk move update origin
+    vector<size_t> pts_in_map;
     for(auto &value: pts) {
-      value += last_ymap_ * map_.info.width + last_xmap_;
+         int row_shift = value / map_.info.width - map_.info.height / 2;
+         int column_shift = value % map_.info.width - map_.info.width / 2;
+         int current_column = last_xmap_ + column_shift + map_.info.width / 2;
+         int current_row = last_ymap_ + row_shift + map_.info.height / 2;
+         // only reserve point in map
+         if(current_column > 0 && current_column < map_.info.height &&
+                current_row > 0 && current_row < map_.info.width) {
+            value += last_ymap_ * map_.info.width + last_xmap_;
+            pts_in_map.push_back(value);
+        }
     }
-    if (pts.empty())
+    if (pts_in_map.empty())
     {
       continue;
     }
@@ -378,12 +388,12 @@ bool MapBuilder::updateMap(const sensor_msgs::LaserScan& scan, long int dx, long
     if (obstacle_in_map)
     {
       // The last point is the point with obstacle.
-      const size_t last_pt = pts.back();
+      const size_t last_pt = pts_in_map.back();
       updatePointOccupancy(true, true, last_pt, map_.data, log_odds_);
-      pts.pop_back();
+        pts_in_map.pop_back();
     }
     // The remaining points are in free space.
-    updatePointsOccupancy(true, false, pts, map_.data, log_odds_);
+    updatePointsOccupancy(true, false, pts_in_map, map_.data, log_odds_);
   }
   return has_moved;
 }

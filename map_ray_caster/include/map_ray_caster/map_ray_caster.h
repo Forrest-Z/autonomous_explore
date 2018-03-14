@@ -9,7 +9,7 @@
 #include <angles/angles.h>
 #include <nav_msgs/OccupancyGrid.h>
 #include <sensor_msgs/LaserScan.h>
-
+#include <geometry_msgs/Point.h>
 #include <map_ray_caster/ray_caster_utils.h>
 
 namespace map_ray_caster
