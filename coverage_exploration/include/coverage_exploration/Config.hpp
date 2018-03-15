@@ -29,6 +29,7 @@ namespace exploration {
         double min_goal_distance;
         double vehicle_length;
         double vehicle_width;
+        double base2back;
     };
 
 } // end namespace motion_planning_libraries

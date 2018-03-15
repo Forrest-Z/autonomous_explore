@@ -14,14 +14,18 @@ public:
 
   tf::StampedTransform lookupPose(std::string parent="/map", std::string child="/base_link") {
       tf::StampedTransform transform;
-      try{
-          listener.lookupTransform(parent, child, ros::Time(0), transform);
+      int temp0 = 0;
+      // wait here until receive tf tree
+      while (temp0 == 0) {
+          try {
+              temp0 = 1;
+              listener.lookupTransform(parent, child, ros::Time(0), transform);
+          } catch (tf::TransformException ex) {
+              temp0 = 0;
+              ros::Duration(0.1).sleep();
+              ROS_WARN("no tf tree is received!");
+          }
       }
-      catch (tf::TransformException &ex) {
-          ROS_ERROR("%s",ex.what());
-          ros::Duration(1.0).sleep();
-      }
-
       return transform;
   }
 

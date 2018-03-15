@@ -13,8 +13,8 @@ using namespace exploration;
 typedef std::multimap<int, GridPoint> Queue;
 typedef std::pair<int, GridPoint> Entry;
 
-#define DEBUG
-
+//#define DEBUG
+#define CV_Dector
 Planner::Planner(Config config) {
     mFrontierCellCount = 0;
     mFrontierCount = 0;
@@ -251,10 +251,12 @@ void Planner::setCoverageMap(PointList points, char value) {
 
 void Planner::addReading(Pose p) {
     PointList points = willBeExplored(p);
+    // deprecated!
+//    clearVehicleBodyArea(p);  // vehicle body current cover area is visible, unnecessary to search!
     for (PointList::iterator i = points.begin(); i < points.end(); ++i) {
         mCoverageMap->setData(*i, VISIBLE);
     }
-    ROS_INFO("add %d cell into new visible label!", points.size());
+    ROS_DEBUG("add %d cell into new visible label!", points.size());
 }
 
 PointList Planner::willBeExplored(Pose p) {
@@ -285,6 +287,7 @@ PointList Planner::willBeExplored(Pose p) {
                 gp.x = x;
                 gp.y = y;
                 char c = 0;
+
                 if (mCoverageMap->getData(gp, c) && c == UNKNOWN && pointInPolygon(current, *sensor) &&
                     isVisible(current, p)) {
                     result.push_back(gp);
@@ -332,7 +335,7 @@ bool Planner::isVisible(FloatPoint point, Pose pose) const {
         p.y = y;
         // not to consider point in previous scanned area
         // todo consider obstcle in line
-        if (mCoverageMap->getData(p, c) && c == VISIBLE)
+        if (mCoverageMap->getData(p, c) && c == OBSTACLE)
             return false;
 
         x += step_x;
@@ -350,15 +353,15 @@ SensorField Planner::transformSensorField(Pose pose) {
     return field;
 }
 
-Polygon Planner::transformPolygon(Polygon polygon, Pose pose) {
-    Polygon::iterator p;
+Polygon Planner::transformPolygon(const Polygon &polygon, Pose pose) {
+    Polygon polyTransform;
+    Polygon::const_iterator p;
     for (p = polygon.begin(); p < polygon.end(); p++) {
         double x_ = (p->x * cos(-pose.theta)) + (p->y * sin(-pose.theta));
         double y_ = -(p->x * sin(-pose.theta)) + (p->y * cos(-pose.theta));
-        p->x = pose.x + x_;
-        p->y = pose.y + y_;
+        polyTransform.push_back(FloatPoint(pose.x + x_, pose.y + y_));
     }
-    return polygon;
+    return polyTransform;
 }
 
 PointList Planner::getUnexploredCells() const {
@@ -386,7 +389,7 @@ void Planner::addSensor(Polygon p) {
     std::vector<FloatPoint>::iterator it = p.begin();
     double len;
     for (; it != p.end(); it++) {
-        len = sqrt(pow(it->x - map_width_ / 2, 2) + pow(it->y - map_height_ / 2, 2));
+        len = sqrt(pow(it->x, 2) + pow(it->y, 2));
         std::cout << "len " << len << " x " << it->x << " y " << it->y << std::endl;
         if (len > mMaxDistantSensorPoint) {
             mMaxDistantSensorPoint = len;
@@ -498,7 +501,20 @@ bool Planner::calculateGoalOrientation(struct Pose goal_point, double &orientati
         }
     }
 
-    // Calculate correct orientation (theta or theta+M_PI) by counting black pixels.
+    // Display windows.
+    cv::Size size(300, 300);//the dst image size,e.g.100x100
+    cv::Mat mat_src_resize, mat_canny_resize;
+    resize(mat_src, mat_src_resize, size);
+    resize(mat_canny_bgr, mat_canny_resize, size);
+
+
+    imshow("source", mat_src_resize);
+    imshow("detected lines", mat_canny_resize);
+
+    cv::waitKey(-1);
+
+
+    // Calculate correct orientation (theta or theta+M_PI) by counting black pixels(UNKNOWN).
     // So, the direction with more black pixels is the direction the exploration should look at.
     int num_pixels_to_check = 10;
     goal_point_cv.theta = expl_point_orientation;
@@ -558,12 +574,8 @@ std::vector<Pose> Planner::getCheapest(std::vector<Pose> &pts, Pose &roboPose,
     }
 
     bool visualize_debug_infos = true;
-    std::vector<std::tuple<Pose, double, double, double, double> > listToBeSorted;
-    listToBeSorted.reserve(pts.size());
     std::vector<Pose> goals;
     goals.reserve(pts.size());
-
-    double yaw = map0to2pi(roboPose.theta);
 
     // The for-loop is used for calculating the angular differences
     // experimental: dividing the number of cells that will be explored 
@@ -571,14 +583,13 @@ std::vector<Pose> Planner::getCheapest(std::vector<Pose> &pts, Pose &roboPose,
     int too_close_counter = 0;
     int no_new_cell_counter = 0;
     int touch_obstacle = 0;
-    int unknown_terrain_class = 0;
     int outside_of_the_map = 0;
     //int touch_difficult_region = 0;
-    size_t robo_pt_x = 0, robo_pt_y = 0;
     bool robot_pos_grid_available = false;
 
     if (roboPose.x > 0 && roboPose.x < map_width_ &&
             roboPose.y > 0 && roboPose.y < map_height_) {
+
         robot_pos_grid_available = true;
     } else {
         ROS_WARN("Robot position (%4.2f, %4.2f) lies outside of the map", roboPose.x, roboPose.y);
@@ -589,7 +600,6 @@ std::vector<Pose> Planner::getCheapest(std::vector<Pose> &pts, Pose &roboPose,
     std::list<ExplorationPoint> expl_point_list;
     for (std::vector<Pose>::const_iterator i = pts.begin(); i != pts.end(); ++i) {
         Pose givenPoint;
-        size_t expl_pt_x = 0, expl_pt_y = 0;
         if ((*i).x > 0 && (*i).x < map_width_ &&
             (*i).y > 0 && (*i).y < map_height_) {
             givenPoint.x = (*i).x;
@@ -606,7 +616,7 @@ std::vector<Pose> Planner::getCheapest(std::vector<Pose> &pts, Pose &roboPose,
         double dist_robo_goal_grid = 0.0;
         if (robot_pos_grid_available && mMaxDistantSensorPoint > 0) {
             dist_robo_goal_grid = sqrt(
-                    pow((int) expl_pt_x - (int) robo_pt_x, 2) + pow((int) expl_pt_y - (int) robo_pt_y, 2));
+                    pow((int) givenPoint.x - (int) roboPose.x, 2) + pow((int) givenPoint.y - (int) roboPose.y, 2));
             if (dist_robo_goal_grid > mMaxDistantSensorPoint) {
                 use_calculate_goal_orientation = true;
             }
@@ -614,22 +624,25 @@ std::vector<Pose> Planner::getCheapest(std::vector<Pose> &pts, Pose &roboPose,
 
         // Calculate angle of exploregoal-vector and map it to 0-2*pi radian.
         double rotationOfPoint = 0.0;
+
         // If the exploration point lies close to the robot or if no matching edge 
         // can be found the old orientation calculation is used.
         bool edge_found = false;
-        if (!(use_calculate_goal_orientation &&
-              calculateGoalOrientation(givenPoint, rotationOfPoint, visualize_debug_infos))) {
+        if (!(use_calculate_goal_orientation /*&&
+              calculateGoalOrientation(givenPoint, rotationOfPoint, visualize_debug_infos)*/)) {
             rotationOfPoint = atan2(i->y - roboPose.y, i->x - roboPose.x);
             ROS_DEBUG("Goal orientation has been calculated using the current robot position");
         } else {
             ROS_DEBUG("Goal orientation has been calculated using edge detection");
             edge_found = true;
+            rotationOfPoint = i->theta; //[o,2pi]
         }
         rotationOfPoint = map0to2pi(rotationOfPoint);
         givenPoint.theta = rotationOfPoint;
 
         // Calculate angular distance, will be [0,2*PI)
-        double angularDistance = fabs(yaw - rotationOfPoint);
+        double yaw = map0to2pi(roboPose.theta);
+        double angularDistance = std::fabs(yaw - rotationOfPoint);
         // Robot will use shortest turning distance!
         if (angularDistance > M_PI) {
             angularDistance = 2 * M_PI - angularDistance;
@@ -663,13 +676,6 @@ std::vector<Pose> Planner::getCheapest(std::vector<Pose> &pts, Pose &roboPose,
         if (calculate_worst_driveability) {
             // todo judge vehicle body collision checking
             //robot_length_x,robot_width_y
-
-                ROS_ERROR("Unknown terrain class");
-                unknown_terrain_class++;
-            if (worst_driveability == 0.0) {
-                touch_obstacle++;
-                continue;
-            }
         }
 
         // Create exploration point and add it to a list to be sorted as soon
@@ -680,9 +686,8 @@ std::vector<Pose> Planner::getCheapest(std::vector<Pose> &pts, Pose &roboPose,
         expl_point_list.push_back(expl_point);
     }
 
-    ROS_INFO(
-            "%d of %d exploration points are uses: %d touches an obstacle, %d are too close to the robot, %d leads to no new cells, %d lies outside of the map",
-            listToBeSorted.size(), pts.size(), touch_obstacle, too_close_counter, no_new_cell_counter,
+    ROS_INFO("%d exploration points are uses: %d touches an obstacle, %d are too close to the robot, %d leads to no new cells, %d lies outside of the map",
+            pts.size(), touch_obstacle, too_close_counter, no_new_cell_counter,
             outside_of_the_map);
 
     std::list<ExplorationPoint>::iterator it = expl_point_list.begin();
@@ -699,7 +704,6 @@ std::vector<Pose> Planner::getCheapest(std::vector<Pose> &pts, Pose &roboPose,
     // Higher values are better, so the optimal goal is the last one.
     expl_point_list.sort();
 
-    // Copy the goal vectors into a vector which is dumped on the port.
     // The list is processed from back to front, so the first element in the goal vector is the best one.
     //TODO ADD Marker showing
     Pose expl_rbs;
@@ -727,19 +731,17 @@ FrontierList Planner::getCoverageFrontiers(Pose start) {
     GridPoint startPoint;
     startPoint.x = start.x;
     startPoint.y = start.y;
-    //todo clear start pose, make it VISIBLE
-    clearVehicleBodyArea(start);
     return getFrontiers(mCoverageMap, startPoint);
 }
 
 void Planner::clearVehicleBodyArea(Pose pos) {
-    //todo consider rectangle geometry
+    /*
     unsigned int xCenter;
     unsigned int yCenter;
 
     xCenter = pos.x;
     yCenter = pos.y;
-    int radius = ceil(2 / map_solution_);
+    int radius = ceil(mConfig.vehicle_width / 2 / map_solution_);
 
     int vx[2], vy[2];
     for(int x = xCenter - radius; x <= xCenter; ++x)
@@ -758,6 +760,36 @@ void Planner::clearVehicleBodyArea(Pose pos) {
                         mCoverageMap->setData(point, VISIBLE);
                     }
             }
+
+    */
+    // Define the robot as rectangle
+    static double left   = -1.0 * mConfig.base2back;
+    static double right  = mConfig.vehicle_length - mConfig.base2back;
+    static double top    = mConfig.vehicle_width / 2.0;
+    static double bottom = -1.0 * mConfig.vehicle_width / 2.0;
+    static double resolution = map_solution_;
+
+    // Coordinate of base_link in OccupancyGrid frame
+    double base_x     = pos.x * resolution;
+    double base_y     = pos.y * resolution;
+    double base_theta = map0to2pi(pos.theta);
+
+    // Calculate cos and sin in advance
+    double cos_theta = std::cos(base_theta);
+    double sin_theta = std::sin(base_theta);
+
+    for (double x = left; x < right; x += resolution) {
+        for (double y = top; y > bottom; y -= resolution) {
+            // 2D point rotation
+            // todo not compact, exisit single cell unprocessed
+            int index_x = (x * cos_theta - y * sin_theta + base_x) / resolution;
+            int index_y = (x * sin_theta + y * cos_theta + base_y) / resolution;
+
+            GridPoint point(index_x, index_y, 0);
+            mCoverageMap->setData(point, VISIBLE);
+        }
+    }
+
 }
 
 const exploration::GridMap &Planner::getCoverageMap() const {
@@ -800,9 +832,14 @@ int Planner::countBlackPixels(cv::Mat mat, struct Pose pose, int vec_len_px) {
 
 
 void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
+    auto start = std::chrono::system_clock::now();
     // After a map has been received
     if(initialized_) {
+        auto start = std::chrono::system_clock::now();
         updateMap();
+        auto end = std::chrono::system_clock::now();
+        auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+        ROS_INFO("updatd sensor area msec: %lf", msec);
         // Generate goal will only produce goals if the operation
         generateGoals();
     }
@@ -842,27 +879,66 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         const double polygon_height = 10;
         const double polygon_base_length = 8.4;
         const double base2camera_length = 3.8;
-        FloatPoint first_pt, second_pt, third_pt;  // point is in ogm
-        first_pt.x =  map_width_ / 2 + int(base2camera_length / map_solution_);
-        first_pt.y = map_height_ / 2;
+        Polygon poly;
+        FloatPoint first_pt, second_pt, third_pt, fourth_pt;  // point is in ogm
+        // front camera
+        first_pt.x =  int(base2camera_length / map_solution_);
+        first_pt.y = 0;
         second_pt.x = first_pt.x + polygon_height / map_solution_;
         second_pt.y = first_pt.y + polygon_base_length / 2 / map_solution_;
         third_pt.x = second_pt.x;
         third_pt.y = first_pt.y - polygon_base_length / 2 / map_solution_;
-
-        Polygon poly;
         poly.push_back(first_pt);
         poly.push_back(second_pt);
         poly.push_back(third_pt);
         addSensor(poly);
 
+        // left camera
+        first_pt.x =  int(base2camera_length / map_solution_);
+        first_pt.y = mConfig.vehicle_width / 2 / map_solution_;
+        second_pt.x = first_pt.x - polygon_base_length / 2 / map_solution_;
+        second_pt.y = first_pt.y + polygon_height / map_solution_;
+        third_pt.x = first_pt.x + polygon_base_length / 2 / map_solution_;
+        third_pt.y = second_pt.y;
+        poly.push_back(first_pt);
+        poly.push_back(second_pt);
+        poly.push_back(third_pt);
+        addSensor(poly);
 
-        ROS_INFO("Planner initialization complete");
+        // right camera
+        first_pt.x =  int(base2camera_length / map_solution_);
+        first_pt.y = mConfig.vehicle_width / 2 / map_solution_;
+        second_pt.x = first_pt.x - polygon_base_length / 2 / map_solution_;
+        second_pt.y = first_pt.y - polygon_height / map_solution_;
+        third_pt.x = first_pt.x + polygon_base_length / 2 / map_solution_;
+        third_pt.y = second_pt.y;
+        poly.push_back(first_pt);
+        poly.push_back(second_pt);
+        poly.push_back(third_pt);
+        addSensor(poly);
+
+        // vehicle body
+        first_pt.x =  int(-mConfig.base2back/ map_solution_);
+        first_pt.y = mConfig.vehicle_width / 2 / map_solution_;
+        second_pt.x = (mConfig.vehicle_length - mConfig.base2back)/ map_solution_;
+        second_pt.y = first_pt.y;
+        third_pt.x = second_pt.x;
+        third_pt.y = -mConfig.vehicle_width / 2 / map_solution_;
+        fourth_pt.x = first_pt.x;
+        fourth_pt.y = -mConfig.vehicle_width / 2 / map_solution_;
+        poly.push_back(first_pt);
+        poly.push_back(second_pt);
+        poly.push_back(third_pt);
+        poly.push_back(fourth_pt);
+        addSensor(poly);
+
+        ROS_WARN("Planner initialization complete");
         initialized_ = true;
     }
     //todo consider situation where map size change
     //update coverage map use traverse map
     {
+        auto start = std::chrono::system_clock::now();
         bool isObstacle;
         PointList obstacles;
         PointList obstacleToUnknown;
@@ -888,37 +964,47 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         }
         setCoverageMap(obstacles, OBSTACLE);
         setCoverageMap(obstacleToUnknown, UNKNOWN);
-        ROS_INFO("Obstalces have been updated!");
+        ROS_WARN("Obstalces have been updated!");
+        auto end = std::chrono::system_clock::now();
+        auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+//        ROS_INFO("Obstalces update msec: %lf", msec);
     }
 
     // publish cover map
-    nav_msgs::OccupancyGrid occ_map;
-    unsigned map_width = map->info.width;
-    unsigned map_height = map->info.height;
-    occ_map.header.frame_id = map->header.frame_id;
-    occ_map.info = map->info;
-    occ_map.data.assign(map_width * map_height, -1);
+    {
+        nav_msgs::OccupancyGrid occ_map;
+        unsigned map_width = map->info.width;
+        unsigned map_height = map->info.height;
+        occ_map.header.frame_id = map->header.frame_id;
+        occ_map.info = map->info;
+        occ_map.data.assign(map_width * map_height, -1);
 
-    for(size_t y = 0; y < map_height; y++) {
-        point.y = y;
-        for(size_t x = 0; x < map_width; x++) {
-            char value = UNKNOWN;
-            point.x = x;
-            unsigned int index = y * map_height + x;
-            if(mCoverageMap->getData(point, value) && value == OBSTACLE) {
-                occ_map.data[index] = 100;
-            } else if(mCoverageMap->getData(point, value) && value == UNKNOWN) {
-                occ_map.data[index] = -1;
-            } else if(mCoverageMap->getData(point, value) && value == VISIBLE) {
-                occ_map.data[index] = 0;
-            } else ;;
+        for (size_t y = 0; y < map_height; y++) {
+            point.y = y;
+            for (size_t x = 0; x < map_width; x++) {
+                char value = UNKNOWN;
+                point.x = x;
+                unsigned int index = y * map_height + x;
+                if (mCoverageMap->getData(point, value) && value == OBSTACLE) {
+                    occ_map.data[index] = 100;
+                } else if (mCoverageMap->getData(point, value) && value == UNKNOWN) {
+                    occ_map.data[index] = -1;
+                } else if (mCoverageMap->getData(point, value) && value == VISIBLE) {
+                    occ_map.data[index] = 0;
+                } else;;
+            }
         }
+        cover_map_pub_.publish(occ_map);
     }
-    cover_map_pub_.publish(occ_map);
+
+    auto end = std::chrono::system_clock::now();
+    auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+    ROS_INFO("update cycle msec: %lf", msec);
+
 }
 
 void Planner::updateMap() {
-    ROS_INFO("Updating map");
+    ROS_WARN("Updating map");
 
     // Initialize saved positions.
     tf::StampedTransform transform;
@@ -931,7 +1017,7 @@ void Planner::updateMap() {
     Pose current_ogm_pose;
     current_ogm_pose.x = (current_pose_.x - map_origin_.x) / map_solution_;
     current_ogm_pose.y = (current_pose_.y - map_origin_.y) / map_solution_;
-    current_ogm_pose.theta = current_pose_.theta;
+    current_ogm_pose.theta = tf::getYaw(transform.getRotation());;
 
     current_pose_ = current_ogm_pose;
 
@@ -941,8 +1027,19 @@ void Planner::updateMap() {
 
 void Planner::generateGoals() {
     ROS_DEBUG("generateGoals");
-
+    auto start = std::chrono::system_clock::now();
     FrontierList goals_tmp = getCoverageFrontiers(current_pose_);
+    auto end = std::chrono::system_clock::now();
+    auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+    ROS_INFO("search frontier cost msec: %lf", msec);
+    for(unsigned int i=0; i<goals_tmp.size(); i++) {
+        // todo filter small frontier (single cell like)
+        if(goals_tmp[i].size() < 25) {
+            goals_tmp.erase(goals_tmp.begin() + i);
+            i--;
+        }
+    }
+
     for(unsigned int i=0; i<goals_tmp.size(); i++) {
         ROS_INFO("(%d)Generates %d frontier goals", i, goals_tmp[i].size());
     }
@@ -975,9 +1072,106 @@ void Planner::generateGoals() {
         }
     }
 
-    final_goals = getCheapest(goals, current_pose_, true, mConfig.vehicle_length, mConfig.vehicle_width);
-    ROS_INFO("Got %d final goals", final_goals.size());
+#ifdef CV_Dector
+    std::vector<Pose> goals_cv;
+    std::vector<int> type_array;
+    // Copy image from the exploration map to the opencv image.
+    // TODO differentiate circle and line contour use opencv
+    cv::Mat mat_src(map_height_, map_width_, CV_8UC1, cv::Scalar(0));
+    // use bfs-dector results, only use cv extract line
+    if(1) {
+        for(std::vector<Pose>::const_iterator it = goals.begin(); it != goals.end(); ++it) {
+            int x_cv = (int)it->x;
+            int y_cv = (int)it->y;
+            mat_src.at<uchar>(y_cv, x_cv) = 255;
+        }
+        cv::Mat  mat_canny_bgr;
+        cv::RNG rng( 0xFFFFFFFF );
+        Color col;
+        cvtColor(mat_src, mat_canny_bgr, CV_GRAY2BGR);
+        std::vector<cv::Vec4f> lines;
+        // Resolution: 1 px and 180/32 degree. last two para is important!
+        HoughLinesP(mat_src, lines, 1, CV_PI / 32, 10, 20, 5);
+        Pose vec;
+        for( size_t i = 0; i < lines.size(); i++ ) {
+            cv::Vec4i l = lines[i];
+            line( mat_canny_bgr, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), col.randomColor(rng), 1, 8/*CV_AA*/);
+            vec.x = (l[0] + l[2]) / 2;
+            vec.y = (l[1] + l[3]) / 2;
+            vec.theta = std::atan2(l[3] - l[1], l[2] - l[0]);
+            {
+                int num_pixels_to_check = 10;
+                double expl_point_orientation = vec.theta;
+                int count_theta = countBlackPixels(mat_src, vec, num_pixels_to_check);
+                vec.theta = expl_point_orientation + M_PI;
+                int count_theta_pi = countBlackPixels(mat_src, vec, num_pixels_to_check);
+                if (abs(count_theta - count_theta_pi) >= 4) { // Difference is big enough.
+                    if (count_theta_pi > count_theta) { // Use orientation with more black / unknown pixels.
+                        expl_point_orientation = expl_point_orientation + M_PI;
+                    }
+                }
+                vec.theta = expl_point_orientation;  //[0, 2pi]
+            }
+            goals_cv.push_back(vec);
+            int type = i;
+            type_array.push_back(type);
+        }
 
+
+        ROS_INFO("LINE number : %d", lines.size());
+
+        cv::imshow("source", mat_src);
+        cv::imshow("detected lines", mat_canny_bgr);
+
+        cv::waitKey(1);
+    }
+    if(0) {
+        cv::Mat mat_src(map_height_, map_width_, CV_8UC1, cv::Scalar(0));
+        char *coverage_map = mCoverageMap->getData();
+        int c = 0;
+        int x_cv = 0;
+        for (int x = 0; x < map_width_; ++x, ++x_cv) {
+            int y_cv = 0;
+            for (int y = 0; y < map_height_; ++y, ++y_cv) {
+                c = (int) coverage_map[y * mCoverageMap->getWidth() + x];
+                if (c == VISIBLE) {
+                    mat_src.at<uchar>(y_cv, x_cv) = 255;
+                } else { // OBSTACLE or UNKNOWN
+                    mat_src.at<uchar>(y_cv, x_cv) = 0;
+                }
+            }
+        }
+        cv::Mat mat_canny, mat_canny_bgr;
+        cv::RNG rng( 0xFFFFFFFF );
+        Color col;
+        Canny(mat_src, mat_canny, 50, 200);
+        cvtColor(mat_canny, mat_canny_bgr, CV_GRAY2BGR);
+        std::vector<cv::Vec4f> lines;
+        // Resolution: 1 px and 180/32 degree. last two para is important!
+        HoughLinesP(mat_canny, lines, 1, CV_PI / 32, 10, 20, 5);
+        for( size_t i = 0; i < lines.size(); i++ )
+        {
+            cv::Vec4i l = lines[i];
+            line( mat_canny_bgr, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), col.randomColor(rng), 1, 8/*CV_AA*/);
+        }
+
+        cv::imshow("source", mat_src);
+        cv::imshow("detected lines", mat_canny_bgr);
+
+        cv::waitKey(1);
+    }
+
+
+
+#endif
+
+    publishMarkerArray(goals_cv, type_array );
+    auto start0 = std::chrono::system_clock::now();
+    final_goals = getCheapest(goals_cv, current_pose_, true, mConfig.vehicle_length, mConfig.vehicle_width);
+    ROS_INFO("Got %d final goals", final_goals.size());
+    auto end0 = std::chrono::system_clock::now();
+    auto msec0 = std::chrono::duration_cast<std::chrono::microseconds>(end0 - start0).count() / 1000.0;
+    ROS_INFO("find cheapest frontier cost msec: %lf", msec0);
 
     if(final_goals.size() == 0) {
         ROS_INFO("No new goals found, state is set to EXPLORATION_DONE");

@@ -49,6 +49,9 @@ namespace exploration {
     struct FloatPoint {
         FloatPoint() : x(0.0), y(0.0) {
         }
+        FloatPoint(double a, double b) : x(a), y(b) {
+
+        }
 
         double x;
         double y;
@@ -79,6 +82,7 @@ namespace exploration {
         ~GridMap() {
             if (isAllocated) delete[] data;
         }
+
 
         bool getData(GridPoint p, char &c) const {
             if (p.x < 0 || p.y < 0 || p.x >= (int) width || p.y >= (int) height)

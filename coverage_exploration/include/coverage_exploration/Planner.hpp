@@ -16,9 +16,11 @@
 #include <tf/transform_listener.h>
 #include <visualization_msgs/MarkerArray.h>
 
+#include <opencv2/core/core.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <boost/foreach.hpp>
+#include <chrono>
 
 
 namespace exploration {
@@ -127,7 +129,7 @@ namespace exploration {
         void addSensor(Polygon p);
 
         /** Coordinate-transgform the given polygon to pose */
-        Polygon transformPolygon(Polygon polygon, Pose pose);
+        Polygon transformPolygon(const Polygon &polygon, Pose pose);
 
         /** Get reachable Frontiers in coverage map from given pose **/
         FrontierList getCoverageFrontiers(Pose start);
