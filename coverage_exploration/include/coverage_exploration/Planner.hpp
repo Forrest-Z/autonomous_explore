@@ -172,7 +172,7 @@ namespace exploration {
 
         void generateGoals();
 
-        void clearVehicleBodyArea(Pose pos);
+        bool isFree(Pose pos);
 
         void publishMarkerArray(const std::vector<Pose> &array, std::vector<int> type);
 
@@ -207,6 +207,10 @@ namespace exploration {
          * Maps the passed angle to [0, 2*PI)
          */
         double map0to2pi(double angle_rad);
+
+
+        bool included(FloatPoint point, std::vector<Polygon> &regions);
+
 
         /**
          * Max distant sensor polygon point in grid coordinates.

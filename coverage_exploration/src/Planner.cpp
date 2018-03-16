@@ -260,6 +260,8 @@ void Planner::addReading(Pose p) {
 }
 
 PointList Planner::willBeExplored(Pose p) {
+    auto start = std::chrono::system_clock::now();
+
     // todo use lookup table ,faster!
     SensorField transformedSF = transformSensorField(p);
 
@@ -295,6 +297,9 @@ PointList Planner::willBeExplored(Pose p) {
             }
         }
     }
+    auto end = std::chrono::system_clock::now();
+    auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+//    ROS_INFO("Imagine sensor area msec: %lf", msec);
     return result;
 }
 
@@ -676,6 +681,11 @@ std::vector<Pose> Planner::getCheapest(std::vector<Pose> &pts, Pose &roboPose,
         if (calculate_worst_driveability) {
             // todo judge vehicle body collision checking
             //robot_length_x,robot_width_y
+            if(!isFree((*i))) {
+                worst_driveability = 0;
+                touch_obstacle++;
+                continue;
+            }
         }
 
         // Create exploration point and add it to a list to be sorted as soon
@@ -719,9 +729,6 @@ std::vector<Pose> Planner::getCheapest(std::vector<Pose> &pts, Pose &roboPose,
 
     if (goals.empty()) {
         ROS_INFO( "did not find any target, propably stuck in an obstacle.");
-    } else if (visualize_debug_infos) {
-        // Adds best goal to the intern grid map for visualization.
-        mCoverageMap->setData(GridPoint(goals.begin()->x, goals.begin()->y ,0), GOAL_CELL);
     }
 
     return goals;
@@ -734,14 +741,14 @@ FrontierList Planner::getCoverageFrontiers(Pose start) {
     return getFrontiers(mCoverageMap, startPoint);
 }
 
-void Planner::clearVehicleBodyArea(Pose pos) {
-    /*
+bool Planner::isFree(Pose pos) {
+
     unsigned int xCenter;
     unsigned int yCenter;
 
     xCenter = pos.x;
     yCenter = pos.y;
-    int radius = ceil(mConfig.vehicle_width / 2 / map_solution_);
+    int radius = ceil(mConfig.vehicle_length / 2 / map_solution_);
 
     int vx[2], vy[2];
     for(int x = xCenter - radius; x <= xCenter; ++x)
@@ -753,15 +760,19 @@ void Planner::clearVehicleBodyArea(Pose pos) {
                 vx[1] = xCenter - (x - xCenter);
                 vy[1] = yCenter - (y - yCenter);
 
+                char value;
                 for(int i=0; i<2; ++i)
                     for(int j=0; j<2; ++j)
                     {
                         GridPoint point(vx[i], vy[j], 0);
-                        mCoverageMap->setData(point, VISIBLE);
+                        if(mCoverageMap->getData(point, value) && value == OBSTACLE) {
+                            return false;
+                        }
                     }
             }
+    return true;
 
-    */
+    /*
     // Define the robot as rectangle
     static double left   = -1.0 * mConfig.base2back;
     static double right  = mConfig.vehicle_length - mConfig.base2back;
@@ -788,7 +799,7 @@ void Planner::clearVehicleBodyArea(Pose pos) {
             GridPoint point(index_x, index_y, 0);
             mCoverageMap->setData(point, VISIBLE);
         }
-    }
+    }*/
 
 }
 
@@ -808,6 +819,19 @@ double Planner::map0to2pi(double angle_rad) {
     }
     return angle_rad;
 }
+
+bool Planner::included(FloatPoint point, std::vector<Polygon> &regions) {
+    for (int i = 0; i < regions.size(); i++) {
+        for (int j = 0; j < regions[i].size(); j++) {
+            if (regions[i][j].x == point.x && regions[i][j].y == point.y) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+
 
 int Planner::countBlackPixels(cv::Mat mat, struct Pose pose, int vec_len_px) {
     Eigen::Vector2d start(pose.x, pose.y);
@@ -888,6 +912,7 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         second_pt.y = first_pt.y + polygon_base_length / 2 / map_solution_;
         third_pt.x = second_pt.x;
         third_pt.y = first_pt.y - polygon_base_length / 2 / map_solution_;
+        poly.clear();
         poly.push_back(first_pt);
         poly.push_back(second_pt);
         poly.push_back(third_pt);
@@ -900,6 +925,7 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         second_pt.y = first_pt.y + polygon_height / map_solution_;
         third_pt.x = first_pt.x + polygon_base_length / 2 / map_solution_;
         third_pt.y = second_pt.y;
+        poly.clear();
         poly.push_back(first_pt);
         poly.push_back(second_pt);
         poly.push_back(third_pt);
@@ -907,11 +933,12 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
 
         // right camera
         first_pt.x =  int(base2camera_length / map_solution_);
-        first_pt.y = mConfig.vehicle_width / 2 / map_solution_;
+        first_pt.y = -mConfig.vehicle_width / 2 / map_solution_;
         second_pt.x = first_pt.x - polygon_base_length / 2 / map_solution_;
         second_pt.y = first_pt.y - polygon_height / map_solution_;
         third_pt.x = first_pt.x + polygon_base_length / 2 / map_solution_;
         third_pt.y = second_pt.y;
+        poly.clear();
         poly.push_back(first_pt);
         poly.push_back(second_pt);
         poly.push_back(third_pt);
@@ -926,13 +953,14 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         third_pt.y = -mConfig.vehicle_width / 2 / map_solution_;
         fourth_pt.x = first_pt.x;
         fourth_pt.y = -mConfig.vehicle_width / 2 / map_solution_;
+        poly.clear();
         poly.push_back(first_pt);
         poly.push_back(second_pt);
         poly.push_back(third_pt);
         poly.push_back(fourth_pt);
         addSensor(poly);
 
-        ROS_WARN("Planner initialization complete");
+        ROS_DEBUG("Planner initialization complete");
         initialized_ = true;
     }
     //todo consider situation where map size change
@@ -964,7 +992,7 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         }
         setCoverageMap(obstacles, OBSTACLE);
         setCoverageMap(obstacleToUnknown, UNKNOWN);
-        ROS_WARN("Obstalces have been updated!");
+        ROS_DEBUG("Obstalces have been updated!");
         auto end = std::chrono::system_clock::now();
         auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
 //        ROS_INFO("Obstalces update msec: %lf", msec);
@@ -1004,7 +1032,7 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
 }
 
 void Planner::updateMap() {
-    ROS_WARN("Updating map");
+    ROS_DEBUG("Updating map");
 
     // Initialize saved positions.
     tf::StampedTransform transform;
@@ -1077,21 +1105,22 @@ void Planner::generateGoals() {
     std::vector<int> type_array;
     // Copy image from the exploration map to the opencv image.
     // TODO differentiate circle and line contour use opencv
-    cv::Mat mat_src(map_height_, map_width_, CV_8UC1, cv::Scalar(0));
     // use bfs-dector results, only use cv extract line
-    if(1) {
+    if(0) {
+        cv::Mat mat_src(map_height_, map_width_, CV_8UC1, cv::Scalar(0));
         for(std::vector<Pose>::const_iterator it = goals.begin(); it != goals.end(); ++it) {
             int x_cv = (int)it->x;
             int y_cv = (int)it->y;
             mat_src.at<uchar>(y_cv, x_cv) = 255;
         }
+
         cv::Mat  mat_canny_bgr;
         cv::RNG rng( 0xFFFFFFFF );
         Color col;
         cvtColor(mat_src, mat_canny_bgr, CV_GRAY2BGR);
         std::vector<cv::Vec4f> lines;
         // Resolution: 1 px and 180/32 degree. last two para is important!
-        HoughLinesP(mat_src, lines, 1, CV_PI / 32, 10, 20, 5);
+        HoughLinesP(mat_src, lines, 1, CV_PI / 32, 5, 20, 10);
         Pose vec;
         for( size_t i = 0; i < lines.size(); i++ ) {
             cv::Vec4i l = lines[i];
@@ -1099,23 +1128,13 @@ void Planner::generateGoals() {
             vec.x = (l[0] + l[2]) / 2;
             vec.y = (l[1] + l[3]) / 2;
             vec.theta = std::atan2(l[3] - l[1], l[2] - l[0]);
-            {
-                int num_pixels_to_check = 10;
-                double expl_point_orientation = vec.theta;
-                int count_theta = countBlackPixels(mat_src, vec, num_pixels_to_check);
-                vec.theta = expl_point_orientation + M_PI;
-                int count_theta_pi = countBlackPixels(mat_src, vec, num_pixels_to_check);
-                if (abs(count_theta - count_theta_pi) >= 4) { // Difference is big enough.
-                    if (count_theta_pi > count_theta) { // Use orientation with more black / unknown pixels.
-                        expl_point_orientation = expl_point_orientation + M_PI;
-                    }
-                }
-                vec.theta = expl_point_orientation;  //[0, 2pi]
-            }
+
             goals_cv.push_back(vec);
             int type = i;
             type_array.push_back(type);
         }
+
+
 
 
         ROS_INFO("LINE number : %d", lines.size());
@@ -1125,7 +1144,7 @@ void Planner::generateGoals() {
 
         cv::waitKey(1);
     }
-    if(0) {
+    if(1) {
         cv::Mat mat_src(map_height_, map_width_, CV_8UC1, cv::Scalar(0));
         char *coverage_map = mCoverageMap->getData();
         int c = 0;
@@ -1149,12 +1168,34 @@ void Planner::generateGoals() {
         std::vector<cv::Vec4f> lines;
         // Resolution: 1 px and 180/32 degree. last two para is important!
         HoughLinesP(mat_canny, lines, 1, CV_PI / 32, 10, 20, 5);
+        Pose vec;
         for( size_t i = 0; i < lines.size(); i++ )
         {
             cv::Vec4i l = lines[i];
             line( mat_canny_bgr, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), col.randomColor(rng), 1, 8/*CV_AA*/);
+            vec.x = (l[0] + l[2]) / 2;
+            vec.y = (l[1] + l[3]) / 2;
+            vec.theta = std::atan2(l[3] - l[1], l[2] - l[0]);
+            {
+                int num_pixels_to_check = 10;
+                double expl_point_orientation = vec.theta;
+                int count_theta = countBlackPixels(mat_src, vec, num_pixels_to_check);
+                vec.theta = expl_point_orientation + M_PI;
+                int count_theta_pi = countBlackPixels(mat_src, vec, num_pixels_to_check);
+                if (abs(count_theta - count_theta_pi) >= 4) { // Difference is big enough.
+                    if (count_theta_pi > count_theta) { // Use orientation with more black / unknown pixels.
+                        expl_point_orientation = expl_point_orientation + M_PI;
+                    }
+                }
+                vec.theta = expl_point_orientation;  //[0, 2pi]
+            }
+
+            goals_cv.push_back(vec);
+            int type = i;
+            type_array.push_back(type);
         }
 
+        ROS_INFO("LINE number : %d", lines.size());
         cv::imshow("source", mat_src);
         cv::imshow("detected lines", mat_canny_bgr);
 
@@ -1165,13 +1206,19 @@ void Planner::generateGoals() {
 
 #endif
 
-    publishMarkerArray(goals_cv, type_array );
+//    publishMarkerArray(goals_cv, type_array );
     auto start0 = std::chrono::system_clock::now();
     final_goals = getCheapest(goals_cv, current_pose_, true, mConfig.vehicle_length, mConfig.vehicle_width);
     ROS_INFO("Got %d final goals", final_goals.size());
     auto end0 = std::chrono::system_clock::now();
     auto msec0 = std::chrono::duration_cast<std::chrono::microseconds>(end0 - start0).count() / 1000.0;
     ROS_INFO("find cheapest frontier cost msec: %lf", msec0);
+
+    if(type_array.size() > 0) {
+        type_array[0] = -2;
+    }
+    publishMarkerArray(final_goals, type_array );
+
 
     if(final_goals.size() == 0) {
         ROS_INFO("No new goals found, state is set to EXPLORATION_DONE");

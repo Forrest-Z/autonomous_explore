@@ -7,11 +7,10 @@ int main(int argc, char **argv) {
     // Initialize the node, publishers and subscribers.
     ros::init(argc, argv, "coverage_exploration_node");
     ros::NodeHandle nh("~");
-    double min_goal_distance = 10;
+    double min_goal_distance = 25;  //cell distance
     double vehicle_width = 2.8;
     double vehicle_length = 4.9;
     double base2back = 1.09;
-    nh.param<double>("min_goal_distance", min_goal_distance, 3);
 
     // ros::Publisher publisher = nh.advertise<geometry_msgs::PoseStamped>("pose_publisher", 1, true);
     Config config;

@@ -335,13 +335,20 @@ void MapBuilder::grow(const sensor_msgs::LaserScan& scan)
     last_ymap_ = ymap;
 
   // Update the map frame, so that it's oriented like frame named "world_frame_id_".
-  tf::Transform map_transform;
-  map_transform.setOrigin(tf::Vector3(-new_tr.getOrigin().x(), -new_tr.getOrigin().y(), 0.0));
-  tf::Quaternion q;
-  q.setRPY(0, 0, -theta);
-  map_transform.setRotation(q);
-  tr_broadcaster_.sendTransform(tf::StampedTransform(map_transform, scan.header.stamp, scan.header.frame_id, map_frame_id_));
-}
+//  tf::Transform map_transform;
+//  map_transform.setOrigin(tf::Vector3(-new_tr.getOrigin().x(), -new_tr.getOrigin().y(), 0.0));
+//  tf::Quaternion q;
+//  q.setRPY(0, 0, -theta);
+//  map_transform.setRotation(q);
+//  tr_broadcaster_.sendTransform(tf::StampedTransform(map_transform, scan.header.stamp, scan.header.frame_id, map_frame_id_));
+        // keep frame same with odom
+        tf::Transform map_transform;
+        map_transform.setOrigin(tf::Vector3(xinit_, yinit_, 0.0));
+        tf::Quaternion q;
+        q.setRPY(0, 0, 0);
+        map_transform.setRotation(q);
+        tr_broadcaster_.sendTransform(tf::StampedTransform(map_transform, ros::Time::now(), "/odom", map_frame_id_));
+    }
 
 bool MapBuilder::updateMap(const sensor_msgs::LaserScan& scan, long int dx, long int dy, double theta)
 {
