@@ -69,6 +69,13 @@ target_link_libraries(grid_map_demo
         ${catkin_LIBRARIES}
         ${PROJECT_NAME})
 
+add_executable(ogm2gridmap_node
+        src/ogm2gridmap_test.cpp)
+
+target_link_libraries(ogm2gridmap_node
+        ${catkin_LIBRARIES}
+        ${PROJECT_NAME})
+
 add_executable(submap_node
   src/submap_node.cpp)
 target_link_libraries(submap_node

@@ -114,11 +114,16 @@ bool InternalGridMap::updateExplorationTransform(const std::vector<grid_map::Ind
                                                  const float penalty_dist,
                                                  float alpha,
                                                  bool use_cell_danger) {
-    if (!this->maps.exists(obs))
+    if (!this->maps.exists(obs)) {
+        ROS_WARN("gridmap have no obs layer");
         return false;
 
-    if (!this->maps.exists(dis))
+    }
+
+    if (!this->maps.exists(dis)) {
+        ROS_WARN("gridmap have no dis layer");
         return false;
+    }
 
     this->maps.add(this->explore_transform, std::numeric_limits<float>::max());
     grid_map::Matrix& expl_layer (this->maps[explore_transform]);
@@ -238,6 +243,9 @@ void InternalGridMap::touchExplorationCell(const int idx_x, const int idx_y, con
     //If not free at cell, return right away
     if (this->maps[obs](idx_x, idx_y) != FREE)
         return;
+    grid_map::Index ind(idx_x, idx_y);
+    float value = this->maps.at(obs, ind);
+//    ROS_INFO("value: %f", value);
 
     float dist = this->maps[dis](idx_x, idx_y) / this->maps.getResolution();
 

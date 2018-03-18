@@ -792,7 +792,6 @@ bool Planner::isFree(Pose pos) {
     for (double x = left; x < right; x += resolution) {
         for (double y = top; y > bottom; y -= resolution) {
             // 2D point rotation
-            // todo not compact, exisit single cell unprocessed
             int index_x = (x * cos_theta - y * sin_theta + base_x) / resolution;
             int index_y = (x * sin_theta + y * cos_theta + base_y) / resolution;
 

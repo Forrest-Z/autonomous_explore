@@ -4,6 +4,7 @@
 #include <algorithm> // sort
 
 #include <nav_msgs/GetMap.h>
+#include <nav_msgs/Path.h>
 #include <geometry_msgs/Twist.h>
 #include <message_filters/subscriber.h>
 #include <std_msgs/ColorRGBA.h>
@@ -13,6 +14,10 @@
 #include <actionlib/client/simple_action_client.h>
 #include <actionlib/client/terminal_state.h>
 #include <opt_utils/opt_utils.hpp>
+#include <internal_grid_map/internal_grid_map.hpp>
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
+#include <path_transform/path_planning.hpp>
+
 
 #include "autonomous_exploration/bfs_frontier_search.hpp"
 #include "autonomous_exploration/util.hpp"
@@ -29,7 +34,7 @@ using namespace tf;
 using namespace ros;
 using namespace frontier_exploration;
 
-//#define DEBUG
+#define DEBUG
 
 
 /**
@@ -87,12 +92,16 @@ class ExploreAction {
 
 public:
 
-    ExploreAction(std::string name) : as_(nh_, name, boost::bind(&ExploreAction::run, this, _1), false),
-                                      action_name_(name), ac_("move_base", true) {
+    ExploreAction(std::string name, config::Config cfg) : as_(nh_, name, boost::bind(&ExploreAction::run, this, _1), false),
+                                      ac_("move_base", true), config_(cfg){
 //		mMarkerPub_ = nh_.advertise<visualization_msgs::Marker>("vis_marker", 2);
         mMarkerPub_ = nh_.advertise<visualization_msgs::MarkerArray>("vis_marker", 2);
+        binary_gom_pub_ = nh_.advertise<nav_msgs::OccupancyGrid>("binary_ogm", 2);
         mGetMapClient_ = nh_.serviceClient<nav_msgs::GetMap>(std::string("current_map"));
+        mGetBinaryMapClient_ = nh_.serviceClient<nav_msgs::GetMap>(std::string("binary_map"));
 
+        start_sub_ = nh_.subscribe("/initialpose", 1, &ExploreAction::startCb, this);
+        path_publisher_ = nh_.advertise<nav_msgs::Path>("PT_path", 1, true);
         double laser_range = 8.0;
 //		nh_.param("laser_max_range", laser_range, 8.);
         mCurrentMap_.setLaserRange(laser_range);
@@ -104,7 +113,7 @@ public:
         nh_.param("gain_threshold", initial_gain_, 20.);
         mCurrentMap_.setGainConst(initial_gain_);
 
-        double robot_radius = 2.0;
+        double robot_radius = config_.vehicle_length / 2;
 //		nh_.param("robot_radius", robot_radius, 2.);
         mCurrentMap_.setRobotRadius(robot_radius);
 
@@ -118,7 +127,8 @@ public:
         nh_.param("min_gain_threshold", minGain_, 0.5);
         nh_.param("gain_change", gainChangeFactor_, 1.5);
 
-        // todo zwk
+        start_point_ = hmpl::Pose2D(10, 10, M_PI);
+
         // keep initial pose
         double xinit_ = 0, yinit_ = 0;
         tf::TransformListener mTfListener;
@@ -141,6 +151,8 @@ public:
         yinit_ = transform.getOrigin().y();
 
         mCurrentMap_.setInitPisition(xinit_, yinit_);
+
+        igm_.vis_.reset(new hmpl::ExplorationTransformVis("PT_map"));
 
         as_.registerPreemptCallback(boost::bind(&ExploreAction::preemptCB, this));
 
@@ -244,7 +256,7 @@ public:
 
 
         int count = 0;
-        std::vector<unsigned int> frontier_centroids;
+        std::vector<geometry_msgs::Point> frontier_array;
         std::vector<PoseWrap> final_goals;
         auto start = hmpl::now();
         while (ok() && as_.isActive()) {
@@ -264,10 +276,93 @@ public:
                 return;
             }
 
-            frontier_centroids = exploreByBfs(&mCurrentMap_, pos_index);
+            if (!getBinaryMap()) {
+                ROS_ERROR("Could not get a Binary map");
+                as_.setPreempted();
+                return;
+            }
 
-            if (frontier_centroids.size() > 0) {
-                final_goals = getCheapest(frontier_centroids, pos_index);
+//            binary_gom_pub_.publish(binary_ogm_);
+            // Initialize gridmap with ogm (all is same)
+            grid_map::GridMapRosConverter::fromOccupancyGrid(binary_ogm_, igm_.obs, igm_.maps);
+            // value replacement
+            grid_map::Matrix& grid_data = igm_.maps[igm_.obs];
+            size_t size_x = igm_.maps.getSize()(0);
+            size_t size_y = igm_.maps.getSize()(1);
+            // pre-process
+            // 0 : obstacle
+            // 255 : free/unknown
+            for (size_t idx_x = 0; idx_x < size_x; ++idx_x){
+                for (size_t idx_y = 0; idx_y < size_y; ++idx_y) {
+                    if (0.0 == grid_data(idx_x, idx_y)) {
+                        grid_data(idx_x, idx_y) = igm_.FREE;
+                    } else if(100.0 == grid_data(idx_x, idx_y)) {
+                        grid_data(idx_x, idx_y) = igm_.OCCUPY;
+                    }
+                }
+            }
+
+            ROS_INFO("Created map with size %f x %f m (%i x %i cells).",
+                     igm_.maps.getLength().x(), igm_.maps.getLength().y(),
+                     igm_.maps.getSize()(0), igm_.maps.getSize()(1));
+            auto start = hmpl::now();
+            igm_.updateDistanceLayerCV();
+            auto end = hmpl::now();
+            std::cout << "fast DT update time [s]:" << hmpl::getDurationInSecs(start, end) << std::endl;
+
+            // find frontier points
+            frontier_array = exploreByBfs(&mCurrentMap_, pos_index);
+
+            // find gridmap index
+            std::vector<grid_map::Index> goals;
+            grid_map::Index goal_index;
+            BOOST_FOREACH(geometry_msgs::Point point, frontier_array) {
+                            grid_map::Position pose(point.x, point.y);
+                            bool flag1 = igm_.maps.getIndex(pose, goal_index);
+                            if(!flag1) {
+                                ROS_WARN("frontier point is out of map!");
+                                continue;
+                            }
+                            goals.push_back(goal_index);
+                        }
+            ROS_INFO("goals of PT nums : %d \n", goals.size());
+
+            start = hmpl::now();
+            igm_.updateExplorationTransform(goals, 5, 10, 1.0);
+            end = hmpl::now();
+            igm_.vis_->publishVisOnDemand(igm_.maps, igm_.explore_transform);
+            ROS_INFO( "PT map cost time %f \n" , hmpl::getDurationInSecs(start, end));
+
+            start = hmpl::now();
+            hmpl::Pose2D revised_start_pose;
+            bool flag = grid_map_path_planning::adjustStartPoseIfOccupied(igm_.maps, start_point_, revised_start_pose,
+                                                                          igm_.obs, igm_.dis, igm_.explore_transform);
+            if(!flag) {
+                std::cout << "start point is out of map" << '\n';
+                continue;
+            }
+
+            std::vector<geometry_msgs::PoseStamped> result_path;
+            grid_map_path_planning::findPathExplorationTransform(igm_.maps, revised_start_pose,
+                                                                 result_path,igm_.obs, igm_.dis, igm_.explore_transform);
+            end = hmpl::now();
+            std::cout << "PT path cost time:" << hmpl::getDurationInSecs(start, end) << "\n";
+            if(!result_path.empty()) {
+                nav_msgs::Path path_msg;
+                geometry_msgs::PoseStamped pose;
+                for (auto &point_itr : result_path) {
+                    pose = point_itr;
+                    path_msg.header.frame_id = igm_.maps.getFrameId();
+                    path_msg.header.stamp = ros::Time::now();
+                    pose.header = path_msg.header;
+                    path_msg.poses.push_back(pose);
+                }
+                path_publisher_.publish(path_msg);
+            }
+
+
+            if (frontier_array.size() > 0) {
+//                final_goals = getCheapest(frontier_centroids, pos_index);
                 break;
             } else {
                 ROS_INFO("Got NO frontier_centroids!");
@@ -279,7 +374,7 @@ public:
         std::cout << " explore cost time:" << hmpl::getDurationInSecs(start, end) << "\n";
 
         if (as_.isActive()) {
-            if (frontier_centroids.size() > 0) {
+            if (final_goals.size() > 0) {
                 as_.setSucceeded();
                 ROS_INFO("Exploration was finished");
             } else {
@@ -288,7 +383,7 @@ public:
             }
         } else {
             as_.setAborted();
-            ROS_INFO("Exploration was interrupted");
+            ROS_INFO("Exploration was aborted");
         }
     }
 
@@ -310,7 +405,15 @@ public:
         }
     }
 
+    void startCb(const geometry_msgs::PoseWithCovarianceStampedConstPtr &start) {
+        start_point_.position.x = start->pose.pose.position.x;
+        start_point_.position.y = start->pose.pose.position.y;
+        start_point_.orientation = tf::getYaw(start->pose.pose.orientation);
+        std::cout << "get initial state." << std::endl;
+    }
+
 private:
+
     int exploreByInfoGain(GridMap *map, unsigned int start) {
         ROS_INFO("Starting exploration");
 
@@ -383,13 +486,19 @@ private:
         }
     }
 
-    std::vector<unsigned int> exploreByBfs(GridMap *map, unsigned int start) {
+    std::vector<geometry_msgs::Point> exploreByBfs(GridMap *map, unsigned int start) {
         ROS_INFO("Starting exploration");
 
-        map->clearArea(start);
-        ROS_INFO("Cleared the area");
+//        map->clearArea(start);
+//        ROS_INFO("Cleared the area");
         FrontierSearch bfs_searcher(map->getMap());
-        std::list<Frontier> frontier_list = bfs_searcher.searchFrom(start);
+
+        hmpl::Pose2D current_pos;
+        geometry_msgs::Pose start_pose = mCurrentMap_.getCurrentLocalPosition();
+        current_pos.position.x = start_pose.position.x;
+        current_pos.position.y = start_pose.position.y;
+        current_pos.orientation = util::modifyTheta(tf::getYaw(start_pose.orientation));
+        std::list<Frontier> frontier_list = bfs_searcher.searchFrom(start, current_pos);
         ROS_INFO("frontier_list size: %d", frontier_list.size());
 
         //create placeholder for selected frontier
@@ -397,6 +506,7 @@ private:
         selected.min_distance = std::numeric_limits<double>::infinity();
 
         std::vector<unsigned int> frontier_array_centroid;
+        std::vector<geometry_msgs::Point> frontier_array;
         std::vector<int> type_array;
         int type = 0, max = 0;
         float originX = map->getOriginX();
@@ -410,30 +520,15 @@ private:
 
                         unsigned int X = (x - originX) / resolution;
                         unsigned int Y = (y - originY) / resolution;
-
                         map->getIndex(X, Y, index);
-
-                        //check if this frontier is the nearest to robot
-//                        if (frontier.min_distance < selected.min_distance){
-//                            selected = frontier;
-//                            max = frontier_array_centroid.size() - 1;
-//                        }
-//
-//                        x = frontier.middle.x;
-//                        y = frontier.middle.y;
-//                        X = (x - originX) / resolution;
-//                        Y = (y - originY) / resolution;
-//                        map->getIndex(X, Y, index);
-//                        frontier_array_centroid.push_back(index);  // insert middle
-//                        type_array.push_back(type + 2);
-                        // judge pass ability
-                        // todo delete/move frontier centrod that in all unknown area
-                        /*if (map->isFree(index)) */{
-                            frontier_array_centroid.push_back(index);  // insert centroid
-                            type_array.push_back(type + 1);
-                            // show invaid frontiers
+                        {
+//                            frontier_array_centroid.push_back(index);  // insert centroid
+//                            type_array.push_back(type + 1);
+                            // show all frontiers
 #ifdef DEBUG
                             BOOST_FOREACH(geometry_msgs::Point point, frontier.point_array) {
+
+                                            frontier_array.push_back(point);
                                             float x = point.x;
                                             float y = point.y;
                                             unsigned int index;
@@ -452,7 +547,7 @@ private:
 #ifdef DEBUG
         publishMarkerArray(frontier_array_centroid, type_array);
 #endif
-        return frontier_array_centroid;
+        return frontier_array;
     }
 
     bool moveTo(unsigned int goal_index) {
@@ -511,8 +606,28 @@ private:
         }
 
         mCurrentMap_.update(srv.response.map);
-        ROS_INFO("Got new map of size %d x %d", mCurrentMap_.getWidth(), mCurrentMap_.getHeight());
-        ROS_INFO("Map resolution is: %f", mCurrentMap_.getResolution());
+//        ROS_INFO("Got new map of size %d x %d", mCurrentMap_.getWidth(), mCurrentMap_.getHeight());
+//        ROS_INFO("Map resolution is: %f", mCurrentMap_.getResolution());
+
+        return true;
+    }
+
+    bool getBinaryMap() {
+        if (!mGetBinaryMapClient_.isValid()) {
+            return false;
+        }
+
+        nav_msgs::GetMap srv;
+
+        if (!mGetBinaryMapClient_.call(srv)) {
+            ROS_INFO("Could not get a Binary map.");
+            return false;
+        }
+
+        binary_ogm_ = srv.response.map;
+//        unsigned int  mMapWidth = binary_ogm_.info.width;
+//        unsigned int mMapHeight = binary_ogm_.info.height;
+//        ROS_INFO("Got new binary map of size %d x %d", mMapWidth, mMapHeight);
 
         return true;
     }
@@ -611,11 +726,7 @@ private:
                         double gx, gy;
                         mCurrentMap_.getOdomCoordinates(gx, gy, index);
 
-                        double goal_proj_x = gx-mxs;
-                        double goal_proj_y = gy-mys;
-
-                        double distance2goal = util::calcDistance(start_pose.position.x, start_pose.position.y,
-                                                                  gx, gy);
+                        double distance2goal = util::calcDistance(mxs, mys, gx, gy);
                         if(distance2goal > max_robot_goal_dist) {
                             max_robot_goal_dist = distance2goal;
                         }
@@ -640,7 +751,10 @@ private:
                             no_new_cell_counter++;
                             continue;
                         }
+
                         // Calculate angular distance, will be [0,PI)
+                        double goal_proj_x = gx-mxs;
+                        double goal_proj_y = gy-mys;
                         double start_angle = util::modifyTheta(tf::getYaw(start_pose.orientation));
                         double goal_angle = util::modifyTheta(std::atan2(goal_proj_y,goal_proj_x));
                         PoseWrap goal_pose(gx, gy, goal_angle);
@@ -676,7 +790,7 @@ private:
             expl_rbs = rit->explPose;
             goals.push_back(expl_rbs);
             ROS_INFO(
-                    "Point(%4.2f, %4.2f, %4.2f) values: overall(%4.2f), expl(%4.2f), ang(%4.2f), dist(%4.2f), driveability(%4.2f), edge(%4.2f)\n",
+                    "Point(%4.2f, %4.2f, %4.2f) values: overall(%4.2f), expl(%4.2f), ang(%4.2f), dist(%4.2f)\n",
                     rit->explPose.x, rit->explPose.y, rit->explPose.theta, rit->overallValue,
                     rit->expl_value, rit->ang_value, rit->dist_value);
             unsigned int x = (rit->explPose.x - origin_x) / mCurrentMap_.getResolution();
@@ -705,7 +819,6 @@ protected:
     actionlib::SimpleActionServer<autonomous_exploration::ExploreAction> as_;
     autonomous_exploration::ExploreFeedback feedback_;
     autonomous_exploration::ExploreResult result_;
-    std::string action_name_;
     MoveBaseClient ac_;
 
     ServiceClient mGetMapClient_;
@@ -717,6 +830,17 @@ protected:
     int goalReached_;
 
     Publisher mMarkerPub_;
+    Publisher binary_gom_pub_;
+    Publisher path_publisher_;
+    Subscriber start_sub_;
+    hmpl::InternalGridMap igm_;
+    ServiceClient mGetBinaryMapClient_;
+    nav_msgs::OccupancyGrid binary_ogm_;
+
+    hmpl::Pose2D start_point_;
+
+
+
 
 public:
     config::Config config_;
@@ -724,8 +848,15 @@ public:
 
 int main(int argc, char **argv) {
     init(argc, argv, "explore_server_node");
+    config::Config cfg;
 
-    ExploreAction explore("explore");
+    cfg.min_goal_distance = 3.0;
+    cfg.weights = config::Weights(1, 1, 1);
+    cfg.vehicle_length = 4.9;
+    cfg.vehicle_width = 2.8;
+    cfg.base2back = 1.09;
+
+    ExploreAction explore("explore", cfg);
 
     spin();
 

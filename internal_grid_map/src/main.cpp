@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
     igm.initializeFromImage(image, map_resolution, grid_map::Position::Zero());
     igm.addObstacleLayerFromImage(image, 0.5);
     igm.maps.setFrameId("map");
-    igm.vis_.reset(new hmpl::ExplorationTransformVis("exploration_transform"));
+    igm.vis_.reset(new hmpl::ExplorationTransformVis( "exploration_transform"));
 
 
     ROS_INFO("Created map with size %f x %f m (%i x %i cells).",

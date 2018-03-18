@@ -41,7 +41,7 @@ namespace hmpl {
     public:
         ExplorationTransformVis(const std::string &topic_name) {
             ros::NodeHandle pnh("~");
-            exploration_transform_pointcloud_pub_ = pnh.advertise<sensor_msgs::PointCloud>(topic_name, 2, false);
+            exploration_transform_pointcloud_pub_ = pnh.advertise<sensor_msgs::PointCloud>( topic_name, 2, false);
         }
 
         virtual ~ExplorationTransformVis() {}
@@ -64,7 +64,7 @@ namespace hmpl {
                 }
 
                 sensor_msgs::PointCloud cloud;
-                cloud.header.frame_id = "/map";
+                cloud.header.frame_id = gridmap.getFrameId();
                 cloud.header.stamp = ros::Time::now();
 
                 geometry_msgs::Point32 point;
