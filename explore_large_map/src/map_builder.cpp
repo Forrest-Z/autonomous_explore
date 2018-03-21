@@ -4,7 +4,7 @@
 
 #include "explore_large_map/map_builder.hpp"
 
-#define OPENCV_SHOW
+//#define OPENCV_SHOW
 
 namespace explore_global_map {
 
@@ -22,37 +22,20 @@ namespace explore_global_map {
         map_.info.origin.orientation.w = 1.0;
         map_.data.assign(width * height, -1);  // Fill with "unknown" occupancy.
 
-
     }
 
     void MapBuilder::grow(nav_msgs::Odometry &global_vehicle_pose,
                           iv_slam_ros_msgs::TraversibleArea &traversible_map) {
 
-        // get x,y
+        // get abosolute x,y
         geographic_to_grid(global_vehicle_pose.pose.pose.position.x, global_vehicle_pose.pose.pose.position.y);
         geographic_to_grid(traversible_map.triD_submap_pose.position.x, traversible_map.triD_submap_pose.position.y);
-        // tailor submap, small filter
-        iv_slam_ros_msgs::TraversibleArea tailored_submap;
-        auto start = std::chrono::system_clock::now();
-        tailorSubmap(traversible_map, tailored_submap);
-        auto end = std::chrono::system_clock::now();
-        auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-        std::cout << "tailor map cost time msec :" << msec << "\n";
 
-        // reverse yaw and roll sequence
-        geometry_msgs::Quaternion msg;
-//        ROS_INFO_STREAM("reverse before: " << tailored_submap.triD_submap_pose.orientation);
-        start = std::chrono::system_clock::now();
-        msg = reverse_yaw_roll(tailored_submap.triD_submap_pose.orientation);
-        end = std::chrono::system_clock::now();
-        msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-        std::cout << "reverse_yaw_roll cost time msec :" << msec << "\n";
-//        ROS_INFO_STREAM("reverse after: " << msg);
-        tailored_submap.triD_submap_pose.orientation = msg;
-        msg = reverse_yaw_roll(global_vehicle_pose.pose.pose.orientation);
-        global_vehicle_pose.pose.pose.orientation = msg;
 
         if(!start_flag_) {
+            geometry_msgs::Quaternion msg;
+            msg = reverse_yaw_roll(global_vehicle_pose.pose.pose.orientation);
+            global_vehicle_pose.pose.pose.orientation = msg;
 
             tf::Quaternion q;
             tf::quaternionMsgToTF(msg, q);
@@ -63,12 +46,34 @@ namespace explore_global_map {
             // todo
             if (fabs(pitch) < 0.1 && fabs(roll) < 0.1) {
                 initial_global_vehicle_pos_ = global_vehicle_pose.pose.pose;
+                initial_global_vehicle_pos_.position.x = 0;  // global map center position
+                initial_global_vehicle_pos_.position.y = 0;
+                // remember initial x and y
+                initial_x_ = global_vehicle_pose.pose.pose.position.x;
+                initial_y_ = global_vehicle_pose.pose.pose.position.y;
                 start_flag_ = true;
             } else {
                 ROS_WARN("current roll : %f, pitvh : %f ,Waiting for more flat position !", roll, pitch);
             }
-
         } else {
+
+            // calc diff
+            global_vehicle_pose.pose.pose.position.x = global_vehicle_pose.pose.pose.position.x - initial_x_;
+            global_vehicle_pose.pose.pose.position.y = global_vehicle_pose.pose.pose.position.y - initial_y_;
+            traversible_map.triD_submap_pose.position.x = traversible_map.triD_submap_pose.position.x - initial_x_;
+            traversible_map.triD_submap_pose.position.y = traversible_map.triD_submap_pose.position.y - initial_y_;
+
+            // tailor submap, small filter
+            iv_slam_ros_msgs::TraversibleArea tailored_submap;
+            tailorSubmap(traversible_map, tailored_submap);
+
+            // reverse yaw and roll sequence
+            geometry_msgs::Quaternion msg;
+            msg = reverse_yaw_roll(tailored_submap.triD_submap_pose.orientation);
+            tailored_submap.triD_submap_pose.orientation = msg;
+            msg = reverse_yaw_roll(global_vehicle_pose.pose.pose.orientation);
+            global_vehicle_pose.pose.pose.orientation = msg;
+
             // get submap rpy
             tf::Quaternion q;
             tf::quaternionMsgToTF(tailored_submap.triD_submap_pose.orientation, q);
@@ -89,11 +94,7 @@ namespace explore_global_map {
             // -->global_odom
             tf::Pose ps;
             tf::poseMsgToTF(global_vehicle_pose.pose.pose, ps);
-            start = std::chrono::system_clock::now();
             tf::poseTFToMsg(worldToMap(initial_global_vehicle_pos_) * ps, current_odom_vehicle_pos_);
-            end = std::chrono::system_clock::now();
-            msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-            std::cout << "worldToMap cost time msec :" << msec << "\n";
             ROS_INFO("vehicle position in odom frame (%f[m], %f[m])", current_odom_vehicle_pos_.position.x,
                      current_odom_vehicle_pos_.position.y);
             // broadcast tf tree
@@ -203,8 +204,7 @@ namespace explore_global_map {
             int global_map_x, global_map_y;
             int ref_in_odom_x, ref_in_odom_y;
 
-            start = std::chrono::system_clock::now();
-            // todo x,y is too large, use diff_x, diff_y;
+            auto start = std::chrono::system_clock::now();
 
             tf::Transform all_trans;
             all_trans = worldToMap(initial_global_vehicle_pos_) * mapToWorld(tailored_submap.triD_submap_pose);
@@ -237,8 +237,8 @@ namespace explore_global_map {
 //                        tf::poseTFToMsg(worldToMap(initial_global_vehicle_pos_) * ps, ps_global_odom);
 //                    }
 
-                    global_map_x = floor( ps_global_odom.position.x  - map_.info.origin.position.x ) / map_.info.resolution;
-                    global_map_y = floor( ps_global_odom.position.y  - map_.info.origin.position.y ) / map_.info.resolution;
+                    global_map_x = floor((ps_global_odom.position.x  - map_.info.origin.position.x) / map_.info.resolution);
+                    global_map_y = floor((ps_global_odom.position.y  - map_.info.origin.position.y) / map_.info.resolution);
                     int index_in_global_map = global_map_y * map_.info.width + global_map_x;
                     if(global_map_x > 0 && global_map_x < map_.info.width &&
                             global_map_y > 0 && global_map_y < map_.info.height) {
@@ -253,14 +253,14 @@ namespace explore_global_map {
                         } else if(tailored_submap.cells[index_in_tailored_map] == 2) {
                             map_.data[index_in_global_map] = 100;
                         } else {
-                            map_.data[index_in_global_map] = -1;
+                            // todo only consider obs and free
+//                            map_.data[index_in_global_map] = -1;
                         }
                     }
                 }
             }
-
-            end = std::chrono::system_clock::now();
-            msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+            auto end = std::chrono::system_clock::now();
+            auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
             std::cout << "all project ...  cost time msec :" << msec << "\n";
 #ifdef OPENCV_SHOW
             int occ_map_width = map_.info.width;
