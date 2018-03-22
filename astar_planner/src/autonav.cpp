@@ -10,6 +10,7 @@
 #include <control_msgs/Traj_Node.h>
 #include <control_msgs/Trajectory.h>
 
+//#define Time_Profile
 
 #include <ros/package.h>
 
@@ -66,9 +67,12 @@ int main(int argc, char **argv) {
     ros::NodeHandle n;
     ros::NodeHandle private_nh_("~");
 
+#ifdef Time_Profile
     hmpl::CSVFile astar_runtime("astar_runtime.csv");
     astar_runtime << "index" << "t" << hmpl::endrow;
     int runtime_counter = 0;
+#endif
+
     std::string map_topic;
     private_nh_.param<std::string>("map_topic", map_topic, "/global_map");
 
@@ -84,85 +88,87 @@ int main(int argc, char **argv) {
     ros::Subscriber goal_sub  = n.subscribe("/move_base_simple/goal", 1, &SearchInfo::goalCallback, &search_info);
 
     // ROS publishers
-    ros::Publisher path_pub = private_nh_.advertise<nav_msgs::Path>("global_path", 1, true);
-    ros::Publisher trajectory_pub = n.advertise<control_msgs::Trajectory>("/global_path", 1, true);
-    ros::Publisher debug_pose_pub = n.advertise<geometry_msgs::PoseArray>("debug_pose_array", 1, true);
-    ros::Publisher footprint_pub_ = n.advertise<visualization_msgs::MarkerArray>("astar_footprint", 1, true);
+    ros::Publisher path_pub = private_nh_.advertise<nav_msgs::Path>("global_path", 1, false);
+    ros::Publisher trajectory_pub = n.advertise<control_msgs::Trajectory>("/global_path", 1, false);
+    ros::Publisher debug_pose_pub = n.advertise<geometry_msgs::PoseArray>("debug_pose_array", 1, false);
+    ros::Publisher footprint_pub_ = n.advertise<visualization_msgs::MarkerArray>("astar_footprint", 1, false);
 
     ros::Rate loop_rate(10);
     while (ros::ok()) {
         ros::spinOnce();
 
-
-        if (!search_info.getMapSet() || !search_info.getStartSet() || !search_info.getGoalSet()) {
+        if (!search_info.getMapSet() || !search_info.getStartSet() /*|| !search_info.getGoalSet()*/) {
             loop_rate.sleep();
             continue;
         }
 
         // Reset flag
         search_info.reset();
-//        std::cout << "search times:" << runtime_counter << std::endl;
-        auto start = std::chrono::system_clock::now();
-        // Execute astar search
-        bool result = astar.makePlan(search_info.getStartPose().pose, search_info.getGoalPose().pose,
-                                     search_info.getMap());
 
-        auto end = std::chrono::system_clock::now();
-        auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-        ROS_INFO("astar msec: %lf", msec);
+        // new next goal received and not reached
+        if(search_info.goal_update_flag_ == false && search_info.getGoalSet()) {
+            auto start = std::chrono::system_clock::now();
+            // Execute astar search
+            bool result = astar.makePlan(search_info.getStartPose().pose, search_info.getGoalPose().pose,
+                                         search_info.getMap());
 
-        if (result) {
-            if (runtime_counter < 101) {
-//                astar_runtime << runtime_counter << msec << hmpl::endrow;
-                runtime_counter++;
-            }
-            ROS_INFO_THROTTLE(1,"Found GOAL!");
-            // sample path by constant length
-            astar.samplePathByStepLength();
+            auto end = std::chrono::system_clock::now();
+            auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+            ROS_INFO_THROTTLE(1, "astar msec: %lf", msec);
 
-            // convert msg : from path to traj
-            path_pub.publish(astar.getDensePath());
-            nav_msgs::Path tmp = astar.getDensePath();
-            control_msgs::Traj_Node path_node;
-            control_msgs::Trajectory trajectory;
-            trajectory.header = tmp.header;
-            for(int i = 0; i < tmp.poses.size(); i++) {
-                path_node.position.x = tmp.poses[i].pose.position.x;
-                path_node.position.y = tmp.poses[i].pose.position.y;
-                if(tmp.poses[i].pose.position.z == -1) {
-                    path_node.forward = 0;  // 0 --> back
-                } else {
-                    path_node.forward = 1; // 1 --> forward
-                }
-                if(search_info.goal_update_flag_ == true) {
-                    path_node.velocity.linear.x = 0;
-                } else {
+            if (result) {
+
+                ROS_INFO_THROTTLE(1, "Found GOAL!");
+                // sample path by constant length
+                astar.samplePathByStepLength();
+
+                // convert msg : from path to traj
+                path_pub.publish(astar.getDensePath());
+                nav_msgs::Path tmp = astar.getDensePath();
+                control_msgs::Traj_Node path_node;
+                control_msgs::Trajectory trajectory;
+                trajectory.header = tmp.header;
+                for (int i = 0; i < tmp.poses.size(); i++) {
+                    path_node.position.x = tmp.poses[i].pose.position.x;
+                    path_node.position.y = tmp.poses[i].pose.position.y;
+                    if (tmp.poses[i].pose.position.z == -1) {
+                        path_node.forward = 0;  // 0 --> back
+                    } else {
+                        path_node.forward = 1; // 1 --> forward
+                    }
                     path_node.velocity.linear.x = 1.5;
+                    trajectory.points.push_back(path_node);
                 }
-                trajectory.points.push_back(path_node);
-            }
 
-            trajectory_pub.publish(trajectory);
-
-            if(search_info.goal_update_flag_ == true) {
-                ROS_INFO("REACHED GOAL!");
-            }
-//            saveStatePath(astar.getDensePath());
-
+                trajectory_pub.publish(trajectory);
+#ifdef Time_Profile
+                if (runtime_counter < 101) {
+                    astar_runtime << runtime_counter << msec << hmpl::endrow;
+                    runtime_counter++;
+                }
+                saveStatePath(astar.getDensePath());
+#endif
 
 #if DEBUG
-            astar.publishPoseArray(debug_pose_pub, "/odom");
-            astar.publishFootPrint(footprint_pub_, "/odom");
+                astar.publishPoseArray(debug_pose_pub, "/odom");
+                astar.publishFootPrint(footprint_pub_, "/odom");
 //            astar.broadcastPathTF();
 #endif
 
-        } else {
-            ROS_INFO("can't find goal...");
-            search_info.goal_update_flag_ = true;
+            } else {
+                for(int i = 0; i < 10; i++) {
+                    ROS_INFO("can't find path!");
+                }
+                search_info.goal_update_flag_ = true;
 
 #if DEBUG
-            astar.publishPoseArray(debug_pose_pub, "/odom"); // debug
+                astar.publishPoseArray(debug_pose_pub, "/odom"); // debug
 #endif
+            }
+        } else {
+
+            ROS_INFO("no goal or goal is reached! waiting for new goal!");
+
         }
 
         astar.reset();
