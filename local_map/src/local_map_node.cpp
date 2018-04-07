@@ -10,7 +10,6 @@
  * - map_height, float, 200, map pixel height (y-direction)
  * - map_resolution, float, 0.020, map resolution (m/pixel)
  */
-#include <chrono>
 
 #include <ros/ros.h>
 #include <tf/transform_broadcaster.h>
@@ -18,26 +17,20 @@
 #include <nav_msgs/OccupancyGrid.h>
 
 #include <local_map/map_builder.h>
-#include <local_map/SaveMap.h>
+#include <opt_utils/opt_utils.hpp>
 
 ros::Publisher map_publisher;
 local_map::MapBuilder* map_builder_ptr;
 
 void handleLaserScan(sensor_msgs::LaserScan msg)
 {
-  auto start = std::chrono::system_clock::now();
+  auto start = hmpl::now();
   map_builder_ptr->grow(msg);
-  auto end = std::chrono::system_clock::now();
-  auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-  std::cout << "update map cost time msec :" << msec << "\n";
+  auto end = hmpl::now();
+  std::cout << "update local map cost time[ms]:" << hmpl::getDurationInSecs(start, end) * 1000 << "\n";
   map_publisher.publish(map_builder_ptr->getMap());
 }
 
-bool save_map(local_map::SaveMap::Request& req,
-    local_map::SaveMap::Response& res)
-{
-  return map_builder_ptr->saveMap(req.name);
-}
 
 int main(int argc, char **argv)
 {
@@ -54,8 +47,7 @@ int main(int argc, char **argv)
   map_builder_ptr = &map_builder;
 
   ros::Subscriber scanHandler = nh.subscribe<sensor_msgs::LaserScan>("/ros_lidar", 1, handleLaserScan);
-  map_publisher = nh.advertise<nav_msgs::OccupancyGrid>("/global_map", 1, true);
-  ros::ServiceServer service = nh.advertiseService("save_map", save_map);
+  map_publisher = nh.advertise<nav_msgs::OccupancyGrid>("/local_map", 1, true);
 
   ros::spin();
 }

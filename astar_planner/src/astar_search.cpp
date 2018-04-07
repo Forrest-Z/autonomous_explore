@@ -1,18 +1,18 @@
 #include "astar_planner/astar_search.h"
 #include <unistd.h>  // usleep
-
 namespace astar_planner {
 
     AstarSearch::AstarSearch() : node_initialized_(false) {
 
         ros::NodeHandle private_nh_("~");
         private_nh_.param<std::string>("path_frame", path_frame_, "/odom");
+        private_nh_.param<bool>("allow_use_last_path", allow_use_last_path_, true);
+        private_nh_.param<bool>("use_back", use_back_, true);
         private_nh_.param<int>("angle_size", angle_size_, 48);
         private_nh_.param<double>("minimum_turning_radius", minimum_turning_radius_, 5);
         private_nh_.param<int>("obstacle_threshold", obstacle_threshold_, 70);
         private_nh_.param<double>("goal_radius", goal_radius_, 2);
         private_nh_.param<double>("goal_angle", goal_angle_, 10.0); // unit: degree
-        private_nh_.param<bool>("use_back", use_back_, true);
         private_nh_.param<double>("robot_length", robot_length_, 4.9);
         private_nh_.param<double>("robot_wheelbase", robot_wheelbase_, 2.84);
         private_nh_.param<double>("robot_width", robot_width_, 2.8);
@@ -20,16 +20,18 @@ namespace astar_planner {
         private_nh_.param<double>("curve_weight", curve_weight_, 1.05);
         private_nh_.param<double>("reverse_weight", reverse_weight_, 2.00);
         private_nh_.param<bool>("use_wavefront_heuristic", use_wavefront_heuristic_, true);
+        private_nh_.param<double>("allow_offset_distance", offset_distance_, 2);
 
         // initial car geometry parameters
         InitCarGeometry(car_);
         // product motion primitive look-up table
         createStateUpdateTable(angle_size_);
 
+
+
     }
 
-    AstarSearch::~AstarSearch() {
-    }
+    AstarSearch::~AstarSearch() = default;
 
     void AstarSearch::resizeNode(int width, int height, int angle_size) {
         nodes_.resize(height);
@@ -180,7 +182,9 @@ namespace astar_planner {
         // From the goal node to the start node
         AstarNode *node = &nodes_[goal.index_y][goal.index_x][goal.index_theta];
 
-        while (node != NULL) {
+        // clear last result path in local frame
+        local_path_.clear();
+        while (node != nullptr) {
             // Set tf pose
             tf::Vector3 origin(node->x, node->y, 0);
             tf::Pose tf_pose;
@@ -189,6 +193,10 @@ namespace astar_planner {
 
             // Transform path to global frame
             tf_pose = map2ogm_ * tf_pose;
+
+            // normalize quaternion
+            tf::Quaternion q = tf_pose.getRotation().normalize();
+            tf_pose.setRotation(q);
 
             // Set path as ros message
             geometry_msgs::PoseStamped ros_pose;
@@ -204,13 +212,29 @@ namespace astar_planner {
 
             path_.poses.push_back(ros_pose);
 
+            hmpl::State state;
+            // convert coord(0,0) to map center
+            state.x = node->x + map_info_.origin.position.x;
+            state.y = node->y + map_info_.origin.position.y;
+            state.z = node->theta;
+            local_path_.push_back(state);
+
             // To the next node
             node = node->parent;
+
         }
 
         // Reverse the vector to be start to goal order
         std::reverse(path_.poses.begin(), path_.poses.end());
+        std::reverse(local_path_.begin(), local_path_.end());
 
+        // adjust first node direciton
+        if( -1 == path_.poses[1].pose.position.z) {
+            path_.poses[0].pose.position.z = -1;
+        }
+
+        // Keep path result
+        last_path_ = path_;
     }
 
     void AstarSearch::samplePathByStepLength(double step) {
@@ -266,21 +290,38 @@ namespace astar_planner {
                     center_x = x1 + sin(t1) * R;
                     center_y = y1 - cos(t1) * R;
                 }
+
+                double angle = t1 - M_PI_2 < 0 ? t1 - M_PI_2 + 2 * M_PI : t1 - M_PI_2;
+                center_x = x1 - R * cos(angle);
+                center_y = y1 - R * sin(angle);
                 // delta arc length now becomes l
                 double num = l / step;
                 int size = static_cast<int>(num);
                 for (int j = 0; j < size; j++) {
                     double heading = t1 + j * step / l * delta_abs_t;
                     double rotate_angle = j * step / l * delta_abs_t;
-                    ros_pose.pose.position.x = center_x + cos(heading - M_PI / 2.0) * R;
-                    ros_pose.pose.position.y = center_y + sin(heading - M_PI / 2.0) * R;
-                    // todo checkbug
-//                astar::counterClockwiseRotatePoint(center_x, center_y, rotate_angle, x1, y1);
-                    ros_pose.pose.position.x = x1;
-                    ros_pose.pose.position.y = y1;
-                    ros_pose.pose.orientation = tf::createQuaternionMsgFromYaw(heading);
+                    ros_pose.pose.position.x = center_x + cos(angle + rotate_angle) * R;
+                    ros_pose.pose.position.y = center_y + sin(angle + rotate_angle) * R;
+//                    ros_pose.pose.orientation = tf::createQuaternionMsgFromYaw(heading);
                     dense_path_.poses.push_back(ros_pose);
+
                 }
+
+                // delta arc length now becomes l
+//                double num = l / step;
+//                int size = static_cast<int>(num);
+//                for (int j = 0; j < size; j++) {
+//                    double heading = t1 + j * step / l * delta_abs_t;
+//                    double rotate_angle = j * step / l * delta_abs_t;
+//                    ros_pose.pose.position.x = center_x + cos(heading - M_PI / 2.0) * R;
+//                    ros_pose.pose.position.y = center_y + sin(heading - M_PI / 2.0) * R;
+//                    // todo checkbug
+////                astar::counterClockwiseRotatePoint(center_x, center_y, rotate_angle, x1, y1);
+////                    ros_pose.pose.position.x = x1;
+////                    ros_pose.pose.position.y = y1;
+//                    ros_pose.pose.orientation = tf::createQuaternionMsgFromYaw(heading);
+//                    dense_path_.poses.push_back(ros_pose);
+//                }
 
             } else {
                 // forward: right turn
@@ -294,21 +335,38 @@ namespace astar_planner {
                     center_x = x1 - sin(t1) * R;
                     center_y = y1 + cos(t1) * R;
                 }
+
+                double angle = t1 - M_PI_2 < 0 ? t1 - M_PI_2 + 2 * M_PI : t1 - M_PI_2;
+                center_x = x1 - R * cos(angle);
+                center_y = y1 - R * sin(angle);
                 // delta arc length now becomes l
                 double num = l / step;
-
                 int size = static_cast<int>(num);
                 for (int j = 0; j < size; j++) {
                     double heading = t1 - j * step / l * delta_abs_t;
                     double rotate_angle = j * step / l * delta_abs_t;
-                    ros_pose.pose.position.x = center_x + cos(heading + M_PI / 2.0) * R;
-                    ros_pose.pose.position.y = center_y + sin(heading + M_PI / 2.0) * R;
-//                astar::clockwiseRotatePoint(center_x, center_y, rotate_angle, x1, y1);
-                    ros_pose.pose.position.x = x1;
-                    ros_pose.pose.position.y = y1;
-                    ros_pose.pose.orientation = tf::createQuaternionMsgFromYaw(heading);
+                    ros_pose.pose.position.x = center_x + cos(angle - rotate_angle) * R;
+                    ros_pose.pose.position.y = center_y + sin(angle - rotate_angle) * R;
+//                    ros_pose.pose.orientation = tf::createQuaternionMsgFromYaw(heading);
                     dense_path_.poses.push_back(ros_pose);
+
                 }
+
+//                // delta arc length now becomes l
+//                double num = l / step;
+//
+//                int size = static_cast<int>(num);
+//                for (int j = 0; j < size; j++) {
+//                    double heading = t1 - j * step / l * delta_abs_t;
+//                    double rotate_angle = j * step / l * delta_abs_t;
+//                    ros_pose.pose.position.x = center_x + cos(heading + M_PI / 2.0) * R;
+//                    ros_pose.pose.position.y = center_y + sin(heading + M_PI / 2.0) * R;
+////                astar::clockwiseRotatePoint(center_x, center_y, rotate_angle, x1, y1);
+////                    ros_pose.pose.position.x = x1;
+////                    ros_pose.pose.position.y = y1;
+//                    ros_pose.pose.orientation = tf::createQuaternionMsgFromYaw(heading);
+//                    dense_path_.poses.push_back(ros_pose);
+//                }
             }
         }
     }
@@ -634,7 +692,7 @@ namespace astar_planner {
                                 //nodes_[i][j][k].gc     = 0;
                                 nodes_[n][m][k].hc = 0;
                                 nodes_[n][m][k].status = STATUS::NONE;
-                                nodes_[n][m][k].parent = NULL;
+                                nodes_[n][m][k].parent = nullptr;
                             }
                         }
                 }
@@ -657,17 +715,41 @@ namespace astar_planner {
             return;
         }
 
-        tf::Transform map2ogm;
         geometry_msgs::Pose ogm_in_map = astar::transformPose(map_info_.origin, map2ogm_frame);
         tf::poseMsgToTF(ogm_in_map, map2ogm_);
 
         // Initialize node according to map size
+        // time-costy for first time!
         if (!node_initialized_) {
             resizeNode(map.info.width, map.info.height, angle_size_);
             node_initialized_ = true;
         }
 
-        ros::WallTime begin = ros::WallTime::now();
+        for (size_t i = 0; i < map.info.height; i++) {
+            for (size_t j = 0; j < map.info.width; j++) {
+                // Index of subscribing OccupancyGrid message
+                size_t og_index = i * map.info.width + j;
+                int cost = map.data[og_index];
+
+                // more than threshold
+                if (cost > obstacle_threshold_ /*|| cost < 0*/) {
+                    nodes_[i][j][0].status = STATUS::OBS;
+                } else {
+                    for (int k = 0; k < angle_size_; k++) {
+                        //nodes_[i][j][k].gc     = 0;
+                        nodes_[i][j][k].hc = 0;
+                        nodes_[i][j][k].status = STATUS::NONE;
+                        nodes_[i][j][k].parent = nullptr;
+                    }
+                }
+
+            }
+        }
+
+    }
+
+    void AstarSearch::updateGridMap(const nav_msgs::OccupancyGrid &map) {
+        //        ros::WallTime begin = ros::WallTime::now();
         grid_map::GridMapRosConverter::fromOccupancyGrid(map, igm_.obs, igm_.maps);
         // from occupancy to gridmap
         // value replacement
@@ -684,8 +766,9 @@ namespace astar_planner {
                 } else if (100.0 == grid_data(idx_x, idx_y)) {
                     grid_data(idx_x, idx_y) = igm_.OCCUPY;
                 } else {
-                    // view unknown as obstacle
-                    grid_data(idx_x, idx_y) = igm_.OCCUPY;
+//                    grid_data(idx_x, idx_y) = igm_.OCCUPY;
+                    // warn : view unknown as free
+                    grid_data(idx_x, idx_y) = igm_.FREE;
                 }
             }
         }
@@ -693,30 +776,8 @@ namespace astar_planner {
         ROS_DEBUG("Created map with size %f x %f m (%i x %i cells).", igm_.maps.getLength().x(),
                   igm_.maps.getLength().y(), igm_.maps.getSize()(0), igm_.maps.getSize()(1));
         igm_.updateDistanceLayerCV();
-        ros::WallTime end = ros::WallTime::now();
+//        ros::WallTime end = ros::WallTime::now();
 //  std::cout << "gridmap process time: " << (end - begin).toSec() * 1000 << "[ms]" << std::endl;
-
-        for (size_t i = 0; i < map.info.height; i++) {
-            for (size_t j = 0; j < map.info.width; j++) {
-                // Index of subscribing OccupancyGrid message
-                size_t og_index = i * map.info.width + j;
-                int cost = map.data[og_index];
-
-                // more than threshold or unknown area
-                if (cost > obstacle_threshold_ || cost < 0) {
-                    nodes_[i][j][0].status = STATUS::OBS;
-                } else {
-                    for (int k = 0; k < angle_size_; k++) {
-                        //nodes_[i][j][k].gc     = 0;
-                        nodes_[i][j][k].hc = 0;
-                        nodes_[i][j][k].status = STATUS::NONE;
-                        nodes_[i][j][k].parent = NULL;
-                    }
-                }
-
-            }
-        }
-
     }
 
     bool AstarSearch::setStartNode() {
@@ -728,8 +789,8 @@ namespace astar_planner {
         SimpleNode start_sn(index_x, index_y, index_theta, 0, 0);
 
         // Check if start is valid
-        if (isOutOfRange(index_x, index_y) ||
-            !isSingleStateCollisionFreeImproved(start_sn)/*detectCollision(start_sn)*/)
+        if (isOutOfRange(index_x,
+                         index_y) || !isSingleStateCollisionFreeImproved(start_sn))
             return false;
 
         // Set start node
@@ -756,12 +817,11 @@ namespace astar_planner {
         int index_y;
         int index_theta;
         poseToIndex(goal_pose_local_.pose, &index_x, &index_y, &index_theta);
-        auto start = std::chrono::system_clock::now();
-        //todo use adjust by dis tf decend dir
-        clearArea(index_x, index_y);
-        auto end = std::chrono::system_clock::now();
-        auto usec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-//  std::cout << "clear goal neighber cost: " << usec / 1000.0 <<  "[ms]" <<  '\n';
+//        auto start = std::chrono::system_clock::now();
+//
+//        auto end = std::chrono::system_clock::now();
+//        auto usec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+////  std::cout << "clear goal neighber cost: " << usec / 1000.0 <<  "[ms]" <<  '\n';
         SimpleNode goal_sn(index_x, index_y, index_theta, 0, 0);
 
 //  grid_map::Index current_index;
@@ -776,6 +836,10 @@ namespace astar_planner {
         if (isOutOfRange(index_x, index_y) ||
             !isSingleStateCollisionFreeImproved(goal_sn)/*|| detectCollision(goal_sn)*/)
             return false;
+
+//    //todo use adjust by dis tf decend dir
+//    clearArea(index_x, index_y);
+
 //  if(detectCollision(goal_sn)) {
 //    ROS_INFO("goal Pose invalid, modifying");
 //    grid_map::Index adjusted_index;
@@ -801,8 +865,7 @@ namespace astar_planner {
             bool wavefront_result = calcWaveFrontHeuristic(goal_sn);
             auto end = std::chrono::system_clock::now();
             auto usec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-//    std::cout << "wavefront cost: " << usec / 1000.0 <<  "[ms]" <<  '\n';
-
+            ROS_INFO_THROTTLE(1, "wavefront cost[ms]: %f", usec / 1000.0 );
             if (!wavefront_result) {
                 ROS_WARN("Goal is not reachable by wavefront checking!");
                 return false;
@@ -821,9 +884,8 @@ namespace astar_planner {
             // Terminate the search if the count reaches a certain value
             ros::WallTime end = ros::WallTime::now();
             float elapse_time = (end - begin).toSec() * 1000;
-            if (elapse_time > 500) {
-                ROS_WARN("Exceed time limit");
-                std::cout << "Exceed time limit: " << (end - begin).toSec() * 1000 << "[ms]" << '\n';
+            if (elapse_time > 200) {
+                ROS_WARN("Astar Exceed time limit in search");
                 return false;
             }
 
@@ -949,28 +1011,115 @@ namespace astar_planner {
 
     bool AstarSearch::makePlan(const geometry_msgs::Pose &start_pose, const geometry_msgs::Pose &goal_pose,
                                const nav_msgs::OccupancyGrid &map) {
+        status_code_ = 0;
+        ros::WallTime begin = ros::WallTime::now();
+        static bool last_result = false;
+        static geometry_msgs::Pose last_goal;
+        bool replan = true;
+        // update map(distance map) before to judge whether to replan
+        updateGridMap(map);
+
+        // convert into global odom frame
         start_pose_local_.pose = start_pose;
         start_pose_ = astar::transformPose(start_pose_local_.pose, map2ogm_);
-
         goal_pose_local_.pose = goal_pose;
         goal_pose_ = astar::transformPose(goal_pose_local_.pose, map2ogm_);
 
-        setMap(map);
+        // todo last success, current plan choose start point in last path
+        // judge whether to replan
+#ifndef PLAN_IN_LOCAL_MAP
+        double goal_dis_diff = astar::calcDistance(last_goal.position.x, last_goal.position.y,
+                                                   goal_pose.position.x, goal_pose.position.y);
+#else
+        // judge goal is unchanged in global frame
+        double goal_dis_diff = astar::calcDistance(last_goal.position.x, last_goal.position.y,
+                                                   goal_pose_.position.x, goal_pose_.position.y);
+#endif
+
+#ifndef PLAN_IN_LOCAL_MAP
+        if(true == last_result) {
+            if(goal_dis_diff < 1) {
+                if(isSinglePathCollisionFreeImproved(local_path_) && isNearLastPath(start_pose) && allow_use_last_path_) {
+                    ROS_INFO_THROTTLE(1, "use last path !");
+                    replan = false;
+                    path_ = last_path_;
+                    return true;
+                } else {
+                    replan = true;
+                }
+            } else {
+                replan = true;
+            }
+        } else {
+            replan = true;
+        }
+#else
+        // no replan need to meet these conditions:
+        // * allowable
+        // * no collision
+        // * same goal pose
+        // * path near start pose(in global map)
+        if(true == last_result) {
+            std::vector<hmpl::State> local_path;
+            globalPath2LocalPath(last_path_, start_pose_, local_path);
+            if(goal_dis_diff < 1) {
+                if(isSinglePathCollisionFreeImproved(local_path) && pathIsNearOrigin(local_path) && allow_use_last_path_) {
+                    ROS_INFO_THROTTLE(1, "use last path !");
+                    replan = false;
+                    path_ = last_path_;
+                    return true;
+                } else {
+                    ROS_INFO("not use last path !");
+                    replan = true;
+                }
+            } else {
+                replan = true;
+            }
+        } else {
+            replan = true;
+        }
+#endif
+
+        auto start = std::chrono::system_clock::now();
+        setMap(map);  // todo time costy when map is large!
+        auto end = std::chrono::system_clock::now();
+        auto usec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        ROS_INFO_STREAM_THROTTLE(1, "map update cost time[ms]:" << usec / 1000.0);
+
         if (!setStartNode()) {
             ROS_WARN("Invalid start pose!");
+            status_code_ = 1;
             return false;
         }
 
         if (!setGoalNode()) {
             ROS_WARN("Invalid goal pose!");
+            status_code_ = 2;
             return false;
         }
-        auto start = std::chrono::system_clock::now();
-        bool result = search();
-        auto end0 = std::chrono::system_clock::now();
-        auto usec = std::chrono::duration_cast<std::chrono::microseconds>(end0 - start).count();
-//  std::cout << "astar search process cost: " << usec / 1000.0 <<  "[ms]" <<  '\n';
 
+        ros::WallTime end0 = ros::WallTime::now();
+        float elapse_time = (end0 - begin).toSec() * 1000;
+        if (elapse_time > 500) {
+            ROS_WARN("Astar search Exceed time limit");
+            status_code_ = 3;
+            return false;
+        }
+
+
+//        start = std::chrono::system_clock::now();
+        bool result = search();
+        if(!result) {status_code_ = 3;}
+//        end = std::chrono::system_clock::now();
+//        usec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+//  std::cout << "astar search process cost: " << usec / 1000.0 <<  "[ms]" <<  '\n';
+#ifndef PLAN_IN_LOCAL_MAP
+        last_goal = goal_pose;
+#else
+        last_goal = goal_pose_;
+#endif
+
+        last_result = result;
         return result;
     }
 
@@ -988,6 +1137,8 @@ namespace astar_planner {
     }
 
     void AstarSearch::publishFootPrint(const ros::Publisher &pub, const std::string &frame) {
+        static int last_point_nums = 0;
+
         // displayFootprint
         visualization_msgs::Marker marker;
         marker.header.frame_id = frame;
@@ -1012,7 +1163,21 @@ namespace astar_planner {
             marker_array.markers.push_back(marker);
             marker.id += 1;
         }
+
+        // delete old markers, latest show for debug
+        if(last_point_nums > path_.poses.size()) {
+            for (int i = path_.poses.size(); i < last_point_nums; i++) {
+                visualization_msgs::Marker marker;
+                marker.ns = "footprint";
+                marker.id = i;
+                marker.action = visualization_msgs::Marker::DELETE;
+                marker_array.markers.push_back(marker);
+            }
+        }
+
         pub.publish(marker_array);
+        // keep last marker numbers
+        last_point_nums = path_.poses.size();
     }
 
 // for demo
@@ -1127,6 +1292,124 @@ namespace astar_planner {
             x = ind_x * map_info_.resolution + map_info_.origin.position.x;
             y = ind_y * map_info_.resolution + map_info_.origin.position.y;
         }
+        return true;
     }
 
+    bool AstarSearch::isSingleStateCollisionFreeImproved(const hmpl::State &current) {
+        // current state is in ogm: origin(0,0) is on center
+        // get the bounding circle position in global frame
+        hmpl::Circle bounding_circle = this->car_.getBoundingCircle(current);
+
+        grid_map::Position pos(bounding_circle.position.x, bounding_circle.position.y);
+        if (this->igm_.maps.isInside(pos)) {
+            double clearance = this->igm_.getObstacleDistance(pos);
+            if (clearance < bounding_circle.r) {
+                // the big circle is not collision-free, then do an exact
+                // collision checking
+                return (this->isSingleStateCollisionFree(current));
+            } else { // collision-free
+                return true;
+            }
+        } else {  // beyond the map boundary
+            return false;
+        }
+    }
+
+    bool AstarSearch::isSinglePathCollisionFreeImproved(std::vector<hmpl::State> &curve) {
+        for (auto &state_itr : curve) {
+            // path collision checking in global frame
+            // get the car footprint bounding circle in global frame, prepare for
+            // the collision checking
+
+            if (!this->isSingleStateCollisionFreeImproved(state_itr)) {
+                // collision
+                return false;
+            } else {
+                // collision-free
+            }
+        }
+        return true;
+    }
+
+    bool AstarSearch::isNearLastPath(const geometry_msgs::Pose &pose) {
+        // convert pose in ogm into odom
+        tf::Vector3 origin(pose.position.x, pose.position.y, 0);
+        tf::Pose tf_pose;
+        tf_pose.setOrigin(origin);
+        tf::Quaternion q;
+        tf::quaternionMsgToTF(pose.orientation, q);
+        tf_pose.setRotation(q);
+        // Transform path to global frame
+        tf_pose = map2ogm_ * tf_pose;
+        // Set path as ros message
+        geometry_msgs::Pose ros_pose;
+        tf::poseTFToMsg(tf_pose, ros_pose);
+
+        int index_min = -1;
+        double min = 999;
+        if (last_path_.poses.size() > 0) {
+            for (int i = 0; i < last_path_.poses.size(); i++) {
+                double deltax = last_path_.poses[i].pose.position.x - ros_pose.position.x;
+                double deltay = last_path_.poses[i].pose.position.y - ros_pose.position.y;
+                double dist = sqrt(pow(deltax, 2) + pow(deltay, 2));
+                if (dist < min) {
+                    min = dist;
+                    index_min = i;
+                }
+            }
+            if (min > offset_distance_) {
+                return false;
+            } else {
+                return true;
+            }
+        } else {
+            return false;
+        }
+    }
+
+    bool AstarSearch::pathIsNearOrigin(const std::vector<hmpl::State> &path) {
+        double min = 999;
+        if (path.size() > 0) {
+            for (int i = 0; i < path.size(); i++) {
+                double deltax = path[i].x ;
+                double deltay = path[i].y;
+                double dist = sqrt(pow(deltax, 2) + pow(deltay, 2));
+                if (dist < min) {
+                    min = dist;
+                }
+            }
+            if (min > offset_distance_) {
+                return false;
+            } else {
+                return true;
+            }
+        } else {
+            return false;
+        }
+    }
+
+
+    void AstarSearch::globalPath2LocalPath(const nav_msgs::Path &global_path, const geometry_msgs::Pose &vehicle_global_pose,
+                                      std::vector<hmpl::State> &local_path) {
+        hmpl::State ref, target, local_pose;
+        ref.x = vehicle_global_pose.position.x;
+        ref.y = vehicle_global_pose.position.y;
+        ref.z = tf::getYaw(vehicle_global_pose.orientation);
+        for(auto &it : global_path.poses) {
+            target.x = it.pose.position.x;
+            target.y = it.pose.position.y;
+            target.z = tf::getYaw(it.pose.orientation);
+            local_pose =  hmpl::globalToLocal(ref, target);
+            local_path.push_back(local_pose);
+        }
+
+    }
+
+
+
 }
+
+
+
+
+

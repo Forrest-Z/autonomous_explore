@@ -1,0 +1,15 @@
+# Get a plan from the current position to the goal Pose 
+
+# The start pose for the plan, frame: odom
+geometry_msgs/Pose start
+
+# The final pose of the goal position, frame: odom
+geometry_msgs/Pose goal
+
+---
+# The status_code
+# 0 --> success; 1 --> invaid start pose; 2 --> invaid goal pose; 3 --> time exceed 
+int8 status_code
+
+# The result path
+control_msgs/Trajectory path

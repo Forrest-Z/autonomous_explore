@@ -10,6 +10,8 @@
 #include <tf/transform_listener.h>
 #include <std_msgs/Int32.h>
 
+
+
 class SearchInfo
 {
  public:
@@ -32,7 +34,10 @@ class SearchInfo
 
   // Reset flags
   void reset();
+  void resetGoalFlag() { goal_set_ = false; }
+  void resetReceiveMapFlag();
 
+  tf::Transform getTfFromOdomToOgm() {return ogm2map_; }
   // update flag
   bool goal_update_flag_;
 
@@ -52,6 +57,15 @@ class SearchInfo
   bool map_set_;
   bool start_set_;
   bool goal_set_;
+
+    std::string global_map_frame_name_;
+    std::string planner_map_frame_name_;
+
+    ros::WallTime last_receive_map_timestamp_;
+    ros::WallTime last_receive_position_timestamp_;
+    ros::WallTime last_receive_goal_timestamp_;
+
+    double allow_time_delay_;
 
 
 };

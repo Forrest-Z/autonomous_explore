@@ -3,6 +3,10 @@
 
 #include <tf/transform_listener.h>
 
+#define CONTROL_LOCAL_PATH
+#define PLAN_IN_LOCAL_MAP
+#define DEBUG 1
+
 enum class STATUS : uint8_t
 {
   NONE,
@@ -88,10 +92,13 @@ inline geometry_msgs::Pose transformPose(geometry_msgs::Pose &pose, tf::Transfor
   // Transform pose
   tf_pose = tf * tf_pose;
 
+  // normalize quaternion
+  tf::Quaternion q = tf_pose.getRotation().normalize();
+  tf_pose.setRotation(q);
+
   // Convert TF pose to ROS pose
   geometry_msgs::Pose ros_pose;
   tf::poseTFToMsg(tf_pose, ros_pose);
-
   return ros_pose;
 }
 
@@ -122,40 +129,6 @@ inline double calcDiffOfRadian(double a, double b)
     return diff;
   else
     return 2 * M_PI - diff;
-}
-
-inline void clockwiseRotatePoint(double ref_x, double ref_y, double angle, double &point_x, double &point_y) {
-  float s = sin(angle);
-  float c = cos(angle);
-
-  // translate point back to origin:
-  point_x -= ref_x;
-  point_y -= ref_y;
-
-  // rotate point
-  float xnew = point_x * c + point_y * s;
-  float ynew = -point_x * s + point_y * c;
-
-  // translate point back:
-  point_x = xnew + ref_x;
-  point_y = ynew + ref_y;
-}
-
-inline void counterClockwiseRotatePoint(double ref_x, double ref_y, double angle, double &point_x, double &point_y) {
-  float s = sin(angle);
-  float c = cos(angle);
-
-  // translate point back to origin:
-  point_x -= ref_x;
-  point_y -= ref_y;
-
-  // rotate point
-  float xnew = point_x * c - point_y * s;
-  float ynew = point_x * s + point_y * c;
-
-  // translate point back:
-  point_x = xnew + ref_x;
-  point_y = ynew + ref_y;
 }
 
 } // namespace astar

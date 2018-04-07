@@ -28,7 +28,7 @@ namespace hmpl {
 namespace sas_element {
 
 /**
- * 2D clockwise angle degrees rotation of point around center point
+ * 2D counter clockwise angle degrees rotation of point around center point
  * @param angle rotation angle
  * @param point point to rotate
  * @param center rotate pivot point

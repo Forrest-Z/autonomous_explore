@@ -13,9 +13,10 @@ using namespace exploration;
 typedef std::multimap<int, GridPoint> Queue;
 typedef std::pair<int, GridPoint> Entry;
 
-//#define DEBUG
+#define DEBUG
 #define CV_Dector
-Planner::Planner(Config config) {
+
+Planner::Planner(Config config) : nh_("~"){
     mFrontierCellCount = 0;
     mFrontierCount = 0;
     mCoverageMap = nullptr;
@@ -24,8 +25,20 @@ Planner::Planner(Config config) {
     // todo push into mconfig parameters
     initialized_ = false;
 
-    cover_map_pub_ = nh_.advertise<nav_msgs::OccupancyGrid>("cover_map", 1, true);
-    mMarkerPub_ = nh_.advertise<visualization_msgs::MarkerArray>("frontier_marker", 2);
+    std::string cover_map_topic_name;
+    nh_.param<std::string>("local_map_frame_name", local_map_frame_name_, "base_link");
+    nh_.param<std::string>("global_map_frame_name", global_map_frame_name_, "/odom");
+    nh_.param<std::string>("send_cover_map_topic_name", cover_map_topic_name, "/cover_map");
+    nh_.param<double>("border_thickness", border_thickness_, 2);
+    nh_.param<int>("obs_threshold_", obs_threshold_, 80);
+    nh_.param<double>("polygon_height", polygon_height_, 10);
+    nh_.param<double>("polygon_base_length", polygon_base_length_, 8.4);
+    nh_.param<double>("base2camera_length", base2camera_length_, 3.8);
+
+    n_ = ros::NodeHandlePtr(new ros::NodeHandle);
+
+    cover_map_pub_ = n_->advertise<nav_msgs::OccupancyGrid>(cover_map_topic_name, 1, true);
+    mMarkerPub_ = n_->advertise<visualization_msgs::MarkerArray>("frontier_marker", 2);
 
 }
 
@@ -249,6 +262,7 @@ void Planner::setCoverageMap(PointList points, char value) {
     }
 }
 
+// todo if vehicle is still, no need to execute this function
 void Planner::addReading(Pose p) {
     PointList points = willBeExplored(p);
     // deprecated!
@@ -339,7 +353,7 @@ bool Planner::isVisible(FloatPoint point, Pose pose) const {
         p.x = x;
         p.y = y;
         // not to consider point in previous scanned area
-        // todo consider obstcle in line
+        //  consider obstacle in line, obstacle could block vision
         if (mCoverageMap->getData(p, c) && c == OBSTACLE)
             return false;
 
@@ -856,15 +870,16 @@ int Planner::countBlackPixels(cv::Mat mat, struct Pose pose, int vec_len_px) {
 
 void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
     auto start = std::chrono::system_clock::now();
+    frame_name_ = map->header.frame_id;
     // After a map has been received
     if(initialized_) {
-        auto start = std::chrono::system_clock::now();
+//        auto start = std::chrono::system_clock::now();
         updateMap();
-        auto end = std::chrono::system_clock::now();
-        auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-        ROS_INFO("updatd sensor area msec: %lf", msec);
+//        auto end = std::chrono::system_clock::now();
+//        auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+//        ROS_INFO_THROTTLE(3, "updatd sensor area msec: %lf", msec);
         // Generate goal will only produce goals if the operation
-        generateGoals();
+//        generateGoals();
     }
 
     GridPoint point;
@@ -882,8 +897,7 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
                 char value = UNKNOWN;
                 point.x = x;
                 unsigned int index = y * map_height_ + x;
-                // todo set threshold = 80
-                if(map->data[index] > 80) {
+                if(map->data[index] > obs_threshold_) {
                     value = OBSTACLE;
                 }
                 map_temp.setData(point, value);
@@ -894,23 +908,21 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
 
         // Initialize saved positions.
         tf::StampedTransform transform;
-        transform = pose_hander_.lookupPose("/odom", "/base_link");
+        transform = pose_hander_.lookupPose(global_map_frame_name_, local_map_frame_name_);
         xinit_ = transform.getOrigin().x();
         yinit_ = transform.getOrigin().y();
 
         // add initialized faked camera polygon(triangle)
-        const double polygon_height = 10;
-        const double polygon_base_length = 8.4;
-        const double base2camera_length = 3.8;
+
         Polygon poly;
         FloatPoint first_pt, second_pt, third_pt, fourth_pt;  // point is in ogm
         // front camera
-        first_pt.x =  int(base2camera_length / map_solution_);
+        first_pt.x =  int(base2camera_length_ / map_solution_);
         first_pt.y = 0;
-        second_pt.x = first_pt.x + polygon_height / map_solution_;
-        second_pt.y = first_pt.y + polygon_base_length / 2 / map_solution_;
+        second_pt.x = first_pt.x + polygon_height_ / map_solution_;
+        second_pt.y = first_pt.y + polygon_base_length_ / 2 / map_solution_;
         third_pt.x = second_pt.x;
-        third_pt.y = first_pt.y - polygon_base_length / 2 / map_solution_;
+        third_pt.y = first_pt.y - polygon_base_length_ / 2 / map_solution_;
         poly.clear();
         poly.push_back(first_pt);
         poly.push_back(second_pt);
@@ -918,11 +930,11 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         addSensor(poly);
 
         // left camera
-        first_pt.x =  int(base2camera_length / map_solution_);
+        first_pt.x =  int(base2camera_length_ / map_solution_);
         first_pt.y = mConfig.vehicle_width / 2 / map_solution_;
-        second_pt.x = first_pt.x - polygon_base_length / 2 / map_solution_;
-        second_pt.y = first_pt.y + polygon_height / map_solution_;
-        third_pt.x = first_pt.x + polygon_base_length / 2 / map_solution_;
+        second_pt.x = first_pt.x - polygon_base_length_ / 2 / map_solution_;
+        second_pt.y = first_pt.y + polygon_height_ / map_solution_;
+        third_pt.x = first_pt.x + polygon_base_length_ / 2 / map_solution_;
         third_pt.y = second_pt.y;
         poly.clear();
         poly.push_back(first_pt);
@@ -931,11 +943,11 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         addSensor(poly);
 
         // right camera
-        first_pt.x =  int(base2camera_length / map_solution_);
+        first_pt.x =  int(base2camera_length_ / map_solution_);
         first_pt.y = -mConfig.vehicle_width / 2 / map_solution_;
-        second_pt.x = first_pt.x - polygon_base_length / 2 / map_solution_;
-        second_pt.y = first_pt.y - polygon_height / map_solution_;
-        third_pt.x = first_pt.x + polygon_base_length / 2 / map_solution_;
+        second_pt.x = first_pt.x - polygon_base_length_ / 2 / map_solution_;
+        second_pt.y = first_pt.y - polygon_height_ / map_solution_;
+        third_pt.x = first_pt.x + polygon_base_length_ / 2 / map_solution_;
         third_pt.y = second_pt.y;
         poly.clear();
         poly.push_back(first_pt);
@@ -965,7 +977,7 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
     //todo consider situation where map size change
     //update coverage map use traverse map
     {
-        auto start = std::chrono::system_clock::now();
+//        auto start = std::chrono::system_clock::now();
         bool isObstacle;
         PointList obstacles;
         PointList obstacleToUnknown;
@@ -979,11 +991,12 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
                 point.x = x;
                 isObstacle = false;
                 unsigned int index = y * height + x;
-                if(map->data[index] > 80) {
+                if(map->data[index] > obs_threshold_) {
                     obstacles.push_back(point);
                     isObstacle = true;
                 }
 
+                // obs -> free, set to unknown, need to explore
                 if(!isObstacle && c_map.getData(point, value) && value == OBSTACLE) {
                     obstacleToUnknown.push_back(point);
                 }
@@ -992,8 +1005,8 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         setCoverageMap(obstacles, OBSTACLE);
         setCoverageMap(obstacleToUnknown, UNKNOWN);
         ROS_DEBUG("Obstalces have been updated!");
-        auto end = std::chrono::system_clock::now();
-        auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+//        auto end = std::chrono::system_clock::now();
+//        auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
 //        ROS_INFO("Obstalces update msec: %lf", msec);
     }
 
@@ -1006,12 +1019,24 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         occ_map.info = map->info;
         occ_map.data.assign(map_width * map_height, -1);
 
+        int thickness = static_cast<int>(border_thickness_ / occ_map.info.resolution);
         for (size_t y = 0; y < map_height; y++) {
             point.y = y;
+            if(y < thickness || y >= map_height - thickness ) {
+                for (size_t x = 0; x < map_width; x++) {
+                    unsigned int index = y * map_width + x;
+                    occ_map.data[index] = 100;  // black border
+                }
+                continue;
+            }
             for (size_t x = 0; x < map_width; x++) {
                 char value = UNKNOWN;
                 point.x = x;
-                unsigned int index = y * map_height + x;
+                unsigned int index = y * map_width + x;
+                if(x < thickness || x >= map_width - thickness) {
+                    occ_map.data[index] = 100;
+                    continue;
+                }
                 if (mCoverageMap->getData(point, value) && value == OBSTACLE) {
                     occ_map.data[index] = 100;
                 } else if (mCoverageMap->getData(point, value) && value == UNKNOWN) {
@@ -1021,12 +1046,13 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
                 } else;;
             }
         }
+
         cover_map_pub_.publish(occ_map);
     }
 
     auto end = std::chrono::system_clock::now();
     auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-    ROS_INFO("update cycle msec: %lf", msec);
+    ROS_INFO_THROTTLE(5, "update cycle msec: %lf", msec);
 
 }
 
@@ -1035,9 +1061,11 @@ void Planner::updateMap() {
 
     // Initialize saved positions.
     tf::StampedTransform transform;
-    transform = pose_hander_.lookupPose("/odom", "/base_link");
-    current_pose_.x = transform.getOrigin().x() - xinit_;
-    current_pose_.y = transform.getOrigin().y() - yinit_;
+    transform = pose_hander_.lookupPose(global_map_frame_name_, local_map_frame_name_);
+//    current_pose_.x = transform.getOrigin().x() - xinit_;
+//    current_pose_.y = transform.getOrigin().y() - yinit_;
+    current_pose_.x = transform.getOrigin().x();
+    current_pose_.y = transform.getOrigin().y();
     current_pose_.theta = tf::getYaw(transform.getRotation()); //[-pi, pi]
 
     // from odom relative pose to ogm
@@ -1048,7 +1076,7 @@ void Planner::updateMap() {
 
     current_pose_ = current_ogm_pose;
 
-    // mark unknown area(not include visible) within faked camera polygon  with VISIBLE
+    // mark unknown area(not include visible) within faked camera polygon  with VISIBLE value
     addReading(current_ogm_pose);
 }
 
@@ -1068,7 +1096,7 @@ void Planner::generateGoals() {
     }
 
     for(unsigned int i=0; i<goals_tmp.size(); i++) {
-        ROS_INFO("(%d)Generates %d frontier goals", i, goals_tmp[i].size());
+        ROS_INFO_THROTTLE(2, "(%d)Generates %d frontier goals", i, goals_tmp[i].size());
     }
 
 #ifdef DEBUG
@@ -1101,7 +1129,7 @@ void Planner::generateGoals() {
 
 #ifdef CV_Dector
     std::vector<Pose> goals_cv;
-    std::vector<int> type_array;
+    std::vector<int> type_array0;
     // Copy image from the exploration map to the opencv image.
     // TODO differentiate circle and line contour use opencv
     // use bfs-dector results, only use cv extract line
@@ -1130,9 +1158,8 @@ void Planner::generateGoals() {
 
             goals_cv.push_back(vec);
             int type = i;
-            type_array.push_back(type);
+            type_array0.push_back(type);
         }
-
 
 
 
@@ -1143,7 +1170,7 @@ void Planner::generateGoals() {
 
         cv::waitKey(1);
     }
-    if(1) {
+    if(0) {
         cv::Mat mat_src(map_height_, map_width_, CV_8UC1, cv::Scalar(0));
         char *coverage_map = mCoverageMap->getData();
         int c = 0;
@@ -1205,7 +1232,7 @@ void Planner::generateGoals() {
 
 #endif
 
-//    publishMarkerArray(goals_cv, type_array );
+//    publishMarkerArray(goals_cv, type_array0 );
     auto start0 = std::chrono::system_clock::now();
     final_goals = getCheapest(goals_cv, current_pose_, true, mConfig.vehicle_length, mConfig.vehicle_width);
     ROS_INFO("Got %d final goals", final_goals.size());
@@ -1232,6 +1259,7 @@ void Planner::generateGoals() {
 
 void Planner::publishMarkerArray(const std::vector<Pose> &array, std::vector<int> type) {
     visualization_msgs::MarkerArray markersMsg;
+    std::string marker_frame = frame_name_;
     for (int i = 0; i < array.size(); i++) {
         double x, y;
         x = array[i].x * map_solution_ + map_origin_.x;
@@ -1247,22 +1275,22 @@ void Planner::publishMarkerArray(const std::vector<Pose> &array, std::vector<int
         type[i] = type[i] % 4;
         if (type[i] == 0) {
             Color color(0, 0, 0.7);
-            marker.setParams("frontier", pose.getPose(), 0.35, color.getColor(), i);
+            marker.setParams(marker_frame, "frontier", pose.getPose(), 0.35, color.getColor(), i);
         } else if (type[i] == 1) {
             Color color(0, 0.7, 0);
-            marker.setParams("frontier", pose.getPose(), 0.35, color.getColor(), i);
+            marker.setParams(marker_frame, "frontier", pose.getPose(), 0.35, color.getColor(), i);
         } else if (type[i] == 2) {
             Color color(0.7, 0, 0);
-            marker.setParams("frontier", pose.getPose(), 0.35, color.getColor(), i);
+            marker.setParams(marker_frame, "frontier", pose.getPose(), 0.35, color.getColor(), i);
         } else if (type[i] == 3) {
             Color color(0, 1.0, 0);
-            marker.setParams("frontier", pose.getPose(), 0.35, color.getColor(), i);
+            marker.setParams(marker_frame, "frontier", pose.getPose(), 0.35, color.getColor(), i);
         } else if (type[i] == -1) {
             Color color(0, 1.0, 0);
-            marker.setParams("frontier", pose.getPose(), 0.15, color.getColor(), i, 0.6);
+            marker.setParams(marker_frame, "frontier", pose.getPose(), 0.15, color.getColor(), i, 0.6);
         } else if (type[i] == -2) {
             Color color(0, 1.0, 0);
-            marker.setParams("frontier", pose.getPose(), 0.75, color.getColor(), i);
+            marker.setParams(marker_frame, "frontier", pose.getPose(), 0.75, color.getColor(), i);
         } else {
             ROS_WARN("TYPE INDEX ERROR!");
         }

@@ -1,0 +1,4 @@
+# define request
+---
+# define response
+nav_msgs/Odometry current_pose

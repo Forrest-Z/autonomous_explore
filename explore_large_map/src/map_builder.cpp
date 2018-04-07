@@ -5,37 +5,102 @@
 #include "explore_large_map/map_builder.hpp"
 
 //#define OPENCV_SHOW
+#define BayesUpdate
 
 namespace explore_global_map {
 
-    explore_global_map::MapBuilder::MapBuilder(int width, int height, double resolution)
-    : start_flag_(false),
-      tailored_submap_width_(60),
-      tailored_submap_height_(40),
-      tailored_submap_x2base_(10){
-        map_.header.frame_id = "/odom";
-        map_.info.width = width;
-        map_.info.height = height;
-        map_.info.resolution = resolution;
-        map_.info.origin.position.x = -static_cast<double>(width) / 2 * resolution;
-        map_.info.origin.position.y = -static_cast<double>(height) / 2 * resolution;
-        map_.info.origin.orientation.w = 1.0;
-        map_.data.assign(width * height, -1);  // Fill with "unknown" occupancy.
+    const double g_default_p_occupied_when_laser = 0.9;
+    const double g_default_p_occupied_when_no_laser = 0.3;
+    const double g_default_large_log_odds = 100;
+    const double g_default_max_log_odds_for_belief = 20;
 
+
+    explore_global_map::MapBuilder::MapBuilder(double width, double height, double resolution) :
+            private_nh_("~"),
+            global_map_height_(height),
+            global_map_width_(width),
+            global_map_frame_name_("/odom"),
+            local_map_frame_name_("base_link"),
+            abso_global_map_frame_name_("/abso_odom"),
+            start_flag_(false),
+            p_occupied_when_laser_(g_default_p_occupied_when_laser),
+            p_occupied_when_no_laser_(g_default_p_occupied_when_no_laser),
+            large_log_odds_(g_default_large_log_odds),
+            max_log_odds_for_belief_(g_default_max_log_odds_for_belief),
+      tailored_submap_width_(50),
+      tailored_submap_height_(75),
+      tailored_submap_x2base_(25) {
+
+        private_nh_.param<std::string>("global_map_frame_name", global_map_frame_name_, "/odom");
+        private_nh_.param<std::string>("local_map_frame_name", local_map_frame_name_, "base_link");
+        private_nh_.param<std::string>("abso_global_map_frame_name", abso_global_map_frame_name_, "/abso_odom");
+
+        private_nh_.param<double>("border_thickness", border_thickness_, 2);
+
+        private_nh_.getParam("p_occupied_when_laser", p_occupied_when_laser_);
+        if (p_occupied_when_laser_ <=0 || p_occupied_when_laser_ >= 1)
+        {
+            ROS_ERROR_STREAM("Parameter "<< private_nh_.getNamespace() <<
+                                         "/p_occupied_when_laser must be within ]0, 1[, setting to default (" <<
+                                         g_default_p_occupied_when_laser << ")");
+            p_occupied_when_laser_ = g_default_p_occupied_when_laser;
+        }
+        private_nh_.getParam("p_occupied_when_no_laser", p_occupied_when_no_laser_);
+        if (p_occupied_when_no_laser_ <=0 || p_occupied_when_no_laser_ >= 1)
+        {
+            ROS_ERROR_STREAM("Parameter "<< private_nh_.getNamespace() <<
+                                         "/p_occupied_when_no_laser must be within ]0, 1[, setting to default (" <<
+                                         g_default_p_occupied_when_no_laser << ")");
+            p_occupied_when_no_laser_ = g_default_p_occupied_when_no_laser;
+        }
+        private_nh_.getParam("large_log_odds", large_log_odds_);
+        if (large_log_odds_ <=0)
+        {
+            ROS_ERROR_STREAM("Parameter "<< private_nh_.getNamespace() << "/large_log_odds must be positive, setting to default (" <<
+                                         g_default_large_log_odds << ")");
+            large_log_odds_ = g_default_large_log_odds;
+        }
+        private_nh_.getParam("max_log_odds_for_belief", max_log_odds_for_belief_);
+        try
+        {
+            std::exp(max_log_odds_for_belief_);
+        }
+        catch (std::exception)
+        {
+            ROS_ERROR_STREAM("Parameter "<< private_nh_.getNamespace() << "/max_log_odds_for_belief too large, setting to default (" <<
+                                         g_default_max_log_odds_for_belief << ")");
+            max_log_odds_for_belief_ = g_default_max_log_odds_for_belief;
+        }
+
+        map_.header.frame_id = global_map_frame_name_;
+        map_.info.width = static_cast<int> (width / resolution);
+        map_.info.height = static_cast<int> (height / resolution);
+        map_.info.resolution = resolution;
+        map_.info.origin.orientation.w = 1.0;  // "odom"
+
+        map_.info.origin.position.x = -width / 2;
+        map_.info.origin.position.y = -height / 2;
+
+        private_nh_.param<int>("unknown_value", unknown_value_, -1);
+        map_.data.assign(map_.info.width * map_.info.height, unknown_value_);  // Fill with "unknown" occupancy.
+
+        // log_odds = log(occupancy / (1 - occupancy); prefill with
+        // occupancy = 0.5, equiprobability between occupied and free.
+        log_odds_.assign(map_.info.width * map_.info.height, 0);
+
+        vehicle_footprint_pub_ = private_nh_.advertise<visualization_msgs::Marker>("/vehicle_in_global", 10, false);
     }
 
-    void MapBuilder::grow(nav_msgs::Odometry &global_vehicle_pose,
-                          iv_slam_ros_msgs::TraversibleArea &traversible_map) {
-
+    void MapBuilder::grow(const nav_msgs::Odometry &vehicle_pose,
+                          const nav_msgs::OccupancyGrid &local_map) {
+        vehicle_pose_in_odom_map_ = vehicle_pose;
         // get abosolute x,y
-        geographic_to_grid(global_vehicle_pose.pose.pose.position.x, global_vehicle_pose.pose.pose.position.y);
-        geographic_to_grid(traversible_map.triD_submap_pose.position.x, traversible_map.triD_submap_pose.position.y);
+        geographic_to_grid(vehicle_pose_in_odom_map_.pose.pose.position.x, vehicle_pose_in_odom_map_.pose.pose.position.y);
 
-
-        if(!start_flag_) {
+        if (!start_flag_) {
             geometry_msgs::Quaternion msg;
-            msg = reverse_yaw_roll(global_vehicle_pose.pose.pose.orientation);
-            global_vehicle_pose.pose.pose.orientation = msg;
+            msg = adjustRPYConvention(vehicle_pose_in_odom_map_.pose.pose.orientation);
+            vehicle_pose_in_odom_map_.pose.pose.orientation = msg;
 
             tf::Quaternion q;
             tf::quaternionMsgToTF(msg, q);
@@ -44,258 +109,190 @@ namespace explore_global_map {
             m.getRPY(roll, pitch, yaw);
             std::cout << "Roll: " << roll << ", Pitch: " << pitch << ", Yaw: " << yaw << std::endl;
             // todo
-            if (fabs(pitch) < 0.1 && fabs(roll) < 0.1) {
-                initial_global_vehicle_pos_ = global_vehicle_pose.pose.pose;
-                initial_global_vehicle_pos_.position.x = 0;  // global map center position
-                initial_global_vehicle_pos_.position.y = 0;
-                // remember initial x and y
-                initial_x_ = global_vehicle_pose.pose.pose.position.x;
-                initial_y_ = global_vehicle_pose.pose.pose.position.y;
+            if (1/*fabs(pitch) < 0.1 && fabs(roll) < 0.1*/) {
+                initial_x_ = vehicle_pose_in_odom_map_.pose.pose.position.x;
+                initial_y_ = vehicle_pose_in_odom_map_.pose.pose.position.y;
+                vehicle_pose_in_odom_map_.pose.pose.position.x -= initial_x_;
+                vehicle_pose_in_odom_map_.pose.pose.position.y -= initial_y_;
+                vehicle_pose_in_odom_map_.pose.pose.position.z = 0;  // set to 0
                 start_flag_ = true;
             } else {
                 ROS_WARN("current roll : %f, pitvh : %f ,Waiting for more flat position !", roll, pitch);
             }
         } else {
-
-            // calc diff
-            global_vehicle_pose.pose.pose.position.x = global_vehicle_pose.pose.pose.position.x - initial_x_;
-            global_vehicle_pose.pose.pose.position.y = global_vehicle_pose.pose.pose.position.y - initial_y_;
-            traversible_map.triD_submap_pose.position.x = traversible_map.triD_submap_pose.position.x - initial_x_;
-            traversible_map.triD_submap_pose.position.y = traversible_map.triD_submap_pose.position.y - initial_y_;
-
-            // tailor submap, small filter
-            iv_slam_ros_msgs::TraversibleArea tailored_submap;
-            tailorSubmap(traversible_map, tailored_submap);
+            vehicle_pose_in_odom_map_.pose.pose.position.x = vehicle_pose_in_odom_map_.pose.pose.position.x - initial_x_;
+            vehicle_pose_in_odom_map_.pose.pose.position.y = vehicle_pose_in_odom_map_.pose.pose.position.y - initial_y_;
+            vehicle_pose_in_odom_map_.pose.pose.position.z = 0;  // set to 0
 
             // reverse yaw and roll sequence
             geometry_msgs::Quaternion msg;
-            msg = reverse_yaw_roll(tailored_submap.triD_submap_pose.orientation);
-            tailored_submap.triD_submap_pose.orientation = msg;
-            msg = reverse_yaw_roll(global_vehicle_pose.pose.pose.orientation);
-            global_vehicle_pose.pose.pose.orientation = msg;
+            msg = adjustRPYConvention(vehicle_pose_in_odom_map_.pose.pose.orientation);
+            vehicle_pose_in_odom_map_.pose.pose.orientation = msg;
 
-            // get submap rpy
-            tf::Quaternion q;
-            tf::quaternionMsgToTF(tailored_submap.triD_submap_pose.orientation, q);
-            tf::Matrix3x3 m(q);
-            double submap_roll, submap_pitch, submap_yaw;
-            m.getRPY(submap_roll, submap_pitch, submap_yaw);
-            // get vehicle rpy
-            tf::quaternionMsgToTF(global_vehicle_pose.pose.pose.orientation, q);
-            tf::Matrix3x3 m0(q);
-            double vehicle_roll, vehicle_pitch, vehilce_yaw;
-            m0.getRPY(vehicle_roll, vehicle_pitch, vehilce_yaw);
+            ROS_INFO_THROTTLE(5, "vehicle position in odom frame (%f[m], %f[m], %f[degree])",
+                              vehicle_pose_in_odom_map_.pose.pose.position.x, vehicle_pose_in_odom_map_.pose.pose.position.y,
+                              tf::getYaw(vehicle_pose_in_odom_map_.pose.pose.orientation) * 180 / M_PI);
 
-            // reserve current submap roll and pitch
-            vehicle_pitch = submap_pitch;
-            vehicle_roll = submap_roll;
-            tf::Quaternion q_new = tf::createQuaternionFromRPY(vehicle_roll, vehicle_pitch, vehilce_yaw);
-            tf::quaternionTFToMsg(q_new, global_vehicle_pose.pose.pose.orientation);
-            // -->global_odom
+            geometry_msgs::Pose abso_odom_vehicle_pose;
+            geometry_msgs::Pose base_odom_pose;
+            base_odom_pose.position.x = initial_x_;
+            base_odom_pose.position.y = initial_y_;
+            tf::quaternionTFToMsg(tf::createQuaternionFromYaw(0.0), base_odom_pose.orientation);
             tf::Pose ps;
-            tf::poseMsgToTF(global_vehicle_pose.pose.pose, ps);
-            tf::poseTFToMsg(worldToMap(initial_global_vehicle_pos_) * ps, current_odom_vehicle_pos_);
-            ROS_INFO("vehicle position in odom frame (%f[m], %f[m])", current_odom_vehicle_pos_.position.x,
-                     current_odom_vehicle_pos_.position.y);
-            // broadcast tf tree
-            broadcastTransformBetweenVehicleAndOdom();
+            tf::poseMsgToTF(vehicle_pose_in_odom_map_.pose.pose, ps);
+            tf::poseTFToMsg(mapToWorld(base_odom_pose) * ps, abso_odom_vehicle_pose);
+            ROS_INFO_THROTTLE(5, "vehicle position in abs_odom frame (%f[m], %f[m], %f[degree])",
+                              abso_odom_vehicle_pose.position.x, abso_odom_vehicle_pose.position.y,
+                              tf::getYaw(abso_odom_vehicle_pose.orientation) * 180 / M_PI);
+            ROS_INFO_THROTTLE(10, "odom_base_x: %f[m], odom_base_y : %f[m]", initial_x_, initial_y_);
+            // publish marker in explore_map frame
+            publishFootPrint(vehicle_pose_in_odom_map_.pose.pose, global_map_frame_name_);
+//            // broadcast tf tree between vehicle and explore map
+            broadcastTransformBetweenVehicleAndExploreMap(vehicle_pose_in_odom_map_.pose.pose);
+//            // broadcast tf tree betw explore map and odom
+            broadcastTransformBetweenExploreMapAndOdom();
 
-
-#ifdef OPENCV_SHOW
-            int map_width = traversible_map.width;
-            int map_height = traversible_map.height;
-            cv::Mat mat_src(map_height, map_width, CV_8UC1, cv::Scalar(127));
-            for(int i = 0; i < map_height; i++) {
-                for(int j = 0; j < map_width; j++) {
-                    int index = i * map_width + j;
-                    if(traversible_map.cells[index] == 1) {
-                        mat_src.at<uchar>(i, j) = 255;
-                    } else if(traversible_map.cells[index] == 2) {
-                        mat_src.at<uchar>(i,j) = 0;
-                    } else {
-                        mat_src.at<uchar>(i,j) = 127;
-                    }
-                }
-            }
-
-            cv::Mat mat_src_bgr;
-            cv::cvtColor(mat_src, mat_src_bgr, CV_GRAY2BGR);
-
-            int re_index_x = traversible_map.triD_submap_pose_image_index_x;
-            int re_index_y = traversible_map.triD_submap_pose_image_index_y;
-            cv::circle(mat_src_bgr, cv::Point(re_index_x, re_index_y), 5, cv::Scalar(255, 0, 0), -1);  // blue
-
-            // project vehicle to submap
-            tf::Pose ps0;
-            geometry_msgs::Pose pose_temp;
-            tf::poseMsgToTF(global_vehicle_pose.pose.pose, ps0);
-            tf::poseTFToMsg(worldToMap(traversible_map.triD_submap_pose) * ps0, pose_temp);
-            int ve_index_x = re_index_x + pose_temp.position.x / traversible_map.resolution;
-            int ve_index_y = re_index_y + pose_temp.position.y / traversible_map.resolution;
-            cv::circle(mat_src_bgr, cv::Point(ve_index_x, ve_index_y), 5, cv::Scalar(0, 0, 255), -1);  // red
-
-
-            int top_left_x = traversible_map.triD_submap_pose_image_index_x - tailored_submap_width_ / 2
-                                                                              / traversible_map.resolution;
-            if(top_left_x < 0) top_left_x = 0;
-            int top_left_y = traversible_map.triD_submap_pose_image_index_y + (tailored_submap_height_ - tailored_submap_x2base_)
-                                                                              /traversible_map.resolution;
-            if(top_left_y > traversible_map.height) top_left_y = traversible_map.height;
-            int bottom_right_x = traversible_map.triD_submap_pose_image_index_x + tailored_submap_width_ / 2
-                                                                                  / traversible_map.resolution;
-            if(bottom_right_x > traversible_map.width) bottom_right_x = traversible_map.width;
-            int bottom_right_y = traversible_map.triD_submap_pose_image_index_y - tailored_submap_x2base_ /traversible_map.resolution;
-            if(bottom_right_y < 0) bottom_right_y = 0;
-
-            cv::Point2i top_left(top_left_x, top_left_y), bottom_right(bottom_right_x, bottom_right_y);
-            cv::Rect roi(top_left, bottom_right);
-            cv::Mat image_roi = mat_src_bgr(roi);
-
-            cv::Mat src_r, roi_r;
-            cv::flip(mat_src_bgr, src_r, 0);
-            cv::flip(image_roi, roi_r, 0);
-            cv::imshow("source", src_r);
-//            cv::imshow("roi", roi_r);
-            cv::waitKey(1);
-
-#endif
-
-
-#ifdef OPENCV_SHOW
-            int tmap_width = tailored_submap.width;
-            int tmap_height = tailored_submap.height;
-            cv::Mat tmat_src(tmap_height, tmap_width, CV_8UC1, cv::Scalar(127));
-            for(int i = 0; i < tmap_height; i++) {
-                for(int j = 0; j < tmap_width; j++) {
-                    int index = i * tmap_width + j;
-                    if(tailored_submap.cells[index] == 1) {
-                        tmat_src.at<uchar>(i, j) = 255;
-                    } else if(tailored_submap.cells[index] == 2) {
-                        tmat_src.at<uchar>(i,j) = 0;
-                    } else {
-                        tmat_src.at<uchar>(i,j) = 127;
-                    }
-                }
-            }
-
-            cv::Mat tmat_src_bgr;
-            cv::cvtColor(tmat_src, tmat_src_bgr, CV_GRAY2BGR);
-
-            re_index_x = tailored_submap.triD_submap_pose_image_index_x;
-            re_index_y = tailored_submap.triD_submap_pose_image_index_y;
-            cv::circle(tmat_src_bgr, cv::Point(re_index_x, re_index_y), 5, cv::Scalar(255, 0, 0), -1);  // blue
-
-            ve_index_x = re_index_x + pose_temp.position.x / tailored_submap.resolution;
-            ve_index_y = re_index_y + pose_temp.position.y / tailored_submap.resolution;
-            cv::circle(tmat_src_bgr, cv::Point(ve_index_x, ve_index_y), 5, cv::Scalar(0, 0, 255), -1);  // red
-
-            cv::Mat t_src_r;
-            cv::flip(tmat_src_bgr, t_src_r, 0);
-            cv::imshow("tailored_map", t_src_r);
-            cv::waitKey(1);
-#endif
 
             // fill tailored submap cell value into odom global map
-            geometry_msgs::Point pt_local_submap;
-            geometry_msgs::Pose ps_local_submap;
-            geometry_msgs::Point pt_global_submap;
-            geometry_msgs::Pose ps_global_submap;
-            geometry_msgs::Pose ps_global_odom;
-            int global_map_x, global_map_y;
-            int ref_in_odom_x, ref_in_odom_y;
+            geometry_msgs::Point pt_local;
+            geometry_msgs::Point pt_global;
 
-            auto start = std::chrono::system_clock::now();
+//            auto start = std::chrono::system_clock::now();
 
             tf::Transform all_trans;
-            all_trans = worldToMap(initial_global_vehicle_pos_) * mapToWorld(tailored_submap.triD_submap_pose);
-            for(int i = 0; i < tailored_submap.height; i++) {
-                for(int j = 0; j < tailored_submap.width; j++) {
-                    int index_in_tailored_map = i * tailored_submap.width + j;
+            all_trans = mapToWorld(vehicle_pose_in_odom_map_.pose.pose) * mapToWorld(local_map.info.origin) ;
+            for (int i = 0; i < local_map.info.height; i++) {
+                for (int j = 0; j < local_map.info.width; j++) {
+                    int index_in_local_map = i * local_map.info.width + j;
                     // -->local_submap
-                    pt_local_submap.x = (j - tailored_submap.triD_submap_pose_image_index_x) * tailored_submap.resolution;
-                    pt_local_submap.y = (i - tailored_submap.triD_submap_pose_image_index_y) * tailored_submap.resolution;
-                    pt_local_submap.z = 0;
-                    ps_local_submap.position = pt_local_submap;
-                    ps_local_submap.orientation = tailored_submap.triD_submap_pose.orientation;
+                    pt_local.x = j * local_map.info.resolution;
+                    pt_local.y = i * local_map.info.resolution;
+                    pt_local.z = 0;
 
                     // -->global_submap
                     {
-                        tf::Pose ps;
-                        tf::poseMsgToTF(ps_local_submap, ps);
-                        tf::poseTFToMsg(all_trans * ps, ps_global_odom);
+                        tf::Point pt;
+                        tf::pointMsgToTF(pt_local, pt);
+                        tf::pointTFToMsg(all_trans * pt, pt_global);
                     }
-//                    if(0) {
-//                        // todo first multiply matrix, then .. faster!
-//                        tf::Point pt(pt_local_submap.x, pt_local_submap.y, 0);
-//                        tf::pointTFToMsg(mapToWorld(tailored_submap.triD_submap_pose) * pt, pt_global_submap);
-//                        ps_global_submap.position = pt_global_submap;
-//                        ps_global_submap.orientation = tailored_submap.triD_submap_pose.orientation;
-//                        // -->global_odom
-//                        tf::Pose ps;
-//                        tf::poseMsgToTF(ps_global_submap, ps);
-//                        // todo ps : yaw use own , roll and pitch use initial !
-//                        tf::poseTFToMsg(worldToMap(initial_global_vehicle_pos_) * ps, ps_global_odom);
-//                    }
 
-                    global_map_x = floor((ps_global_odom.position.x  - map_.info.origin.position.x) / map_.info.resolution);
-                    global_map_y = floor((ps_global_odom.position.y  - map_.info.origin.position.y) / map_.info.resolution);
+                    int global_map_x = floor((pt_global.x - map_.info.origin.position.x) / map_.info.resolution);
+                    int global_map_y = floor((pt_global.y - map_.info.origin.position.y) / map_.info.resolution);
                     int index_in_global_map = global_map_y * map_.info.width + global_map_x;
-                    if(global_map_x > 0 && global_map_x < map_.info.width &&
-                            global_map_y > 0 && global_map_y < map_.info.height) {
-                        if(i == tailored_submap.triD_submap_pose_image_index_y
-                                && j == tailored_submap.triD_submap_pose_image_index_x)
-                        {
-                            ref_in_odom_x = global_map_x;
-                            ref_in_odom_y = global_map_y;
-                        }
-                        if(tailored_submap.cells[index_in_tailored_map] == 1) {
-                            map_.data[index_in_global_map] = 0;
-                        } else if(tailored_submap.cells[index_in_tailored_map] == 2) {
+                    if (global_map_x > 0 && global_map_x < map_.info.width && global_map_y > 0 &&
+                        global_map_y < map_.info.height) {
+
+                        // todo use bayes inference
+                       if (local_map.data[index_in_local_map] == 100) {
+#ifdef BayesUpdate
+                           updatePointOccupancy(true, true, index_in_global_map, map_.data, log_odds_);
+#else
                             map_.data[index_in_global_map] = 100;
-                        } else {
-                            // todo only consider obs and free
-//                            map_.data[index_in_global_map] = -1;
-                        }
-                    }
-                }
-            }
-            auto end = std::chrono::system_clock::now();
-            auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-            std::cout << "all project ...  cost time msec :" << msec << "\n";
-#ifdef OPENCV_SHOW
-            int occ_map_width = map_.info.width;
-            int occ_map_height = map_.info.height;
-            cv::Mat occ_mat_src(occ_map_width, occ_map_height, CV_8UC1, cv::Scalar(127));
-            for(int i = 0; i < occ_map_height; i++) {
-                for(int j = 0; j < occ_map_width; j++) {
-                    int index = i * occ_map_width + j;
-                    if(map_.data[index] == 0) {
-                        occ_mat_src.at<uchar>(i, j) = 255;
-                    } else if(map_.data[index] == 100) {
-                        occ_mat_src.at<uchar>(i, j) = 0;
-                    } else {
-                        occ_mat_src.at<uchar>(i, j) = 127;
-                    }
-                }
-            }
-
-            cv::Mat occ_mat_bgr;
-            cv::cvtColor(occ_mat_src, occ_mat_bgr, CV_GRAY2BGR);
-            cv::Point2d current_pos;
-            current_pos.x = (current_odom_vehicle_pos_.position.x - map_.info.origin.position.x) / map_.info.resolution;
-            current_pos.y = (current_odom_vehicle_pos_.position.y - map_.info.origin.position.y) / map_.info.resolution;
-            cv::circle(occ_mat_bgr, current_pos, 5, cv::Scalar(0, 0, 255), -1); // red
-            cv::circle(occ_mat_bgr, cv::Point(ref_in_odom_x, ref_in_odom_y), 5, cv::Scalar(255, 0, 0), -1); // blue
-
-            cv::Mat occ_mat_bgr_r;
-            cv::flip(occ_mat_bgr, occ_mat_bgr_r, 0);
-            cv::imshow("global_map", occ_mat_bgr_r);
-            cv::waitKey(1);
 #endif
+
+                        } else if(local_map.data[index_in_local_map] == 0){
+#ifdef BayesUpdate
+                           updatePointOccupancy(true, false, index_in_global_map, map_.data, log_odds_);
+#else
+                           // when view unknown cell is free, this free cells assignement are error!!!
+                           map_.data[index_in_global_map] = 0;
+#endif
+
+                        } // only consider obs and free, ignore unknwon cell cover
+//                            map_.data[index_in_global_map] = -1;
+                    }
+                }
+            }
+          
+           // black border
+            int thickness = static_cast<int>(border_thickness_ / map_.info.resolution);
+            for (size_t y = 0; y < map_.info.height; y++) {
+                if (y < thickness || y >= map_.info.height - thickness) {
+                    for (size_t x = 0; x < map_.info.width; x++) {
+                        unsigned int index = y * map_.info.width + x;
+                        map_.data[index] = 100;  // black border
+                    }
+                    continue;
+                }
+                for (size_t x = 0; x < map_.info.width; x++) {
+                    unsigned int index = y * map_.info.width + x;
+                    if (x < thickness || x >= map_.info.width - thickness) {
+                        map_.data[index] = 100;
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
+    /** Update occupancy and log odds for a point
+ *
+ * @param[in] use_bayes true if consider error of sensor
+ * @param[in] occupied true if the point was measured as occupied
+ * @param[in] idx pixel index
+ * @param[in] ncol map width
+ * @param[in,out] occupancy occupancy map to update
+ * @param[in,out] log_odds log odds to update
+ */
+    void MapBuilder::updatePointOccupancy(bool use_bayes, bool occupied, size_t idx, std::vector<int8_t>& occupancy,
+                                          std::vector<double>& log_odds) const  {
+        if (idx >= occupancy.size())
+        {
+            return;
         }
 
+        if (occupancy.size() != log_odds.size())
+        {
+            ROS_ERROR("occupancy and count do not have the same number of elements");
+            return;
+        }
+        if(use_bayes) {
+            // Update log_odds.
+            double p;  // Probability of being occupied knowing current measurement.
+            if (occupied) {
+                p = p_occupied_when_laser_;
+            } else {
+                p = p_occupied_when_no_laser_;
+            }
+            // Original formula: Table 4.2, "Probabilistics robotics", Thrun et al., 2005:
+            // log_odds[idx] = log_odds[idx] +
+            //     std::log(p * (1 - p_occupancy) / (1 - p) / p_occupancy);
+            // With p_occupancy = 0.5, this simplifies to:
+            log_odds[idx] += std::log(p / (1 - p));
+            if (log_odds[idx] < -large_log_odds_) {
+                log_odds[idx] = -large_log_odds_;
+            } else if (log_odds[idx] > large_log_odds_) {
+                log_odds[idx] = large_log_odds_;
+            }
+            // Update occupancy.
+            if (log_odds[idx] < -max_log_odds_for_belief_) {
+                occupancy[idx] = 0;
+            } else if (log_odds[idx] > max_log_odds_for_belief_) {
+                occupancy[idx] = 100;
+            } else {
+                occupancy[idx] = static_cast<int8_t>(lround((1 - 1 / (1 + std::exp(log_odds[idx]))) * 100));
+            }
 
+            // assign status
+            if(occupancy[idx] >= 0 && occupancy[idx] <= 30) {
+                occupancy[idx] = 0;
+            } else if(occupancy[idx] >= 80 && occupancy[idx] <= 100){
+                occupancy[idx] = 100;
+            } else {
+                // unknown cells
+                occupancy[idx] = -1;
+            }
+        }  // consider pure ideal cases
+        else {
+            if(occupied) {
+                occupancy[idx] = 100;
+            } else {
+                occupancy[idx] = 0;
+            }
+        }
     }
+
+
 
     void MapBuilder::tailorSubmap(const iv_slam_ros_msgs::TraversibleArea &traver_map,
                                   iv_slam_ros_msgs::TraversibleArea &tailored_submap) {
@@ -321,7 +318,7 @@ namespace explore_global_map {
         tailored_submap.height = end_index_y - start_index_y;
         tailored_submap.triD_submap_pose_image_index_x = submap_x - start_index_x;
         tailored_submap.triD_submap_pose_image_index_y = submap_y - start_index_y;
-        tailored_submap.cells.assign(tailored_submap.width * tailored_submap.height, 0);
+        tailored_submap.cells.assign(tailored_submap.width * tailored_submap.height, 0);  //0 mean unknown cell
 
 //        ROS_INFO("tailor_map: width --> %d  height --> %d , ref position :(%d, %d)", tailored_submap.width, tailored_submap.height,
 //                 submap_x - start_index_x, submap_y - start_index_y);
@@ -353,14 +350,52 @@ namespace explore_global_map {
 
     }
 
-    void MapBuilder::broadcastTransformBetweenVehicleAndOdom() {
+    void MapBuilder::broadcastTransformBetweenVehicleAndExploreMap(geometry_msgs::Pose &current_pose) {
         tf::Transform transform;
-        transform.setOrigin(tf::Vector3(current_odom_vehicle_pos_.position.x,
-        current_odom_vehicle_pos_.position.y, 0));
+        transform.setOrigin(tf::Vector3(current_pose.position.x,
+                                        current_pose.position.y, 0));
         tf::Quaternion q;
-        tf::quaternionMsgToTF(current_odom_vehicle_pos_.orientation, q);
+        tf::quaternionMsgToTF(current_pose.orientation, q);
         transform.setRotation(q);
-        br_.sendTransform(tf::StampedTransform(transform, ros::Time::now(), "/odom", "base_link"));
+        br_.sendTransform(tf::StampedTransform(transform, ros::Time::now(), global_map_frame_name_, local_map_frame_name_));
 
     }
+
+    void MapBuilder::broadcastTransformBetweenExploreMapAndOdom() {
+        tf::Transform transform;
+        transform.setOrigin(tf::Vector3(initial_x_,
+                                        initial_y_, 0));
+        tf::Quaternion q;
+        q.setRPY(0, 0, 0);
+        transform.setRotation(q);
+//        transform.setRotation(tf::Quaternion(0, 0, 0, 1));
+        br_.sendTransform(tf::StampedTransform(transform, ros::Time::now(), abso_global_map_frame_name_, global_map_frame_name_));
+
+    }
+
+    void MapBuilder::publishFootPrint(const geometry_msgs::Pose &pose, const std::string &frame) {
+        // displayFootprint
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = frame;
+        marker.header.stamp = ros::Time();
+        marker.ns = "global_map/footprint";
+        marker.id = 0;
+        marker.type = visualization_msgs::Marker::CUBE;
+        marker.action = visualization_msgs::Marker::ADD;
+
+        marker.scale.x = 4.9;
+        marker.scale.y = 1.95;
+        marker.scale.z = 2.0;
+        marker.color.a = 0.3;
+        marker.color.r = 0.0;
+        marker.color.g = 1.0;
+        marker.color.b = 0.0;
+        marker.frame_locked = true;
+
+        marker.pose = pose;
+
+        vehicle_footprint_pub_.publish(marker);
+    }
+
+
 }

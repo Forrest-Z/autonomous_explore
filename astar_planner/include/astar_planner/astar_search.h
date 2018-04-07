@@ -1,7 +1,6 @@
 #ifndef ASTAR_NAVI_NODE_H
 #define ASTAR_NAVI_NODE_H
 
-#define DEBUG 1
 
 #include <iostream>
 #include <vector>
@@ -19,7 +18,7 @@
 #include <visualization_msgs/MarkerArray.h>
 #include <internal_grid_map/internal_grid_map.hpp>
 #include <car_model/car_geometry.hpp>
-
+#include <opt_utils/opt_utils.hpp>
 
 namespace astar_planner {
 
@@ -41,7 +40,7 @@ class AstarSearch
   nav_msgs::Path getPath() {return path_;}
   nav_msgs::Path getDensePath() {return dense_path_;}
   void samplePathByStepLength(double step = 0.1);
-
+  int getStatusCode() {return status_code_;}
  private:
   bool search();
   void resizeNode(int width, int height, int angle_size);
@@ -52,6 +51,7 @@ class AstarSearch
   bool isOutOfRange(int index_x, int index_y);
   void setPath(const SimpleNode &goal);
 
+  void updateGridMap(const nav_msgs::OccupancyGrid &map);
   void setMap(const nav_msgs::OccupancyGrid &map);
   bool setStartNode();
   bool setGoalNode();
@@ -65,7 +65,13 @@ class AstarSearch
   bool isSingleStateCollisionFree(const SimpleNode &current_state);
   bool isSingleStateCollisionFree(const hmpl::State &current);
   bool isSingleStateCollisionFreeImproved(const SimpleNode &current_state);
-  bool isSinglePathCollisionFreeImproved(std::vector<SimpleNode> *curve);
+  bool isSingleStateCollisionFreeImproved(const hmpl::State &current);
+  bool isSinglePathCollisionFreeImproved(std::vector<hmpl::State> &curve);
+  bool isNearLastPath(const geometry_msgs::Pose &pose);
+  bool pathIsNearOrigin(const std::vector<hmpl::State> &path);
+  void globalPath2LocalPath(const nav_msgs::Path &global_path, const geometry_msgs::Pose &vehicle_global_pose,
+                            std::vector<hmpl::State> &local_path);
+
 
   bool findValidClosePose(const grid_map::GridMap& grid_map,
                           const std::string dis_layer_name,
@@ -134,12 +140,23 @@ class AstarSearch
   nav_msgs::Path path_;
   // Dense path
   nav_msgs::Path dense_path_;
+  // last path result
+    nav_msgs::Path last_path_;
+    // local path result
+    std::vector<hmpl::State> local_path_;
+
 
   // gridmap
   hmpl::InternalGridMap igm_;
 
   // car model
   hmpl::CarGeometry car_;
+
+  //  path replan parameters
+  double offset_distance_;
+  bool allow_use_last_path_;
+
+  int status_code_;
 
 
 

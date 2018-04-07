@@ -317,15 +317,7 @@ void MapBuilder::grow(const sensor_msgs::LaserScan& scan)
 
 
   // Update the map
-  bool move;
-    double border_x = map_.info.origin.position.x, border_y = map_.info.origin.position.y;
-    if(x <= border_x || x >= -border_x
-            || y <= border_y || y >= -border_y) {
-        ; // Outside map: do not update map
-    } else {
-        // inside map
-        move = updateMap(scan, map_dx, map_dy, theta);
-    }
+  bool move = updateMap(scan, map_dx, map_dy, theta);
   if (move)
   {
     ROS_INFO("Displacement: %ld, %ld pixels", map_dx, map_dy);
@@ -334,35 +326,54 @@ void MapBuilder::grow(const sensor_msgs::LaserScan& scan)
     last_xmap_ = xmap;
     last_ymap_ = ymap;
 
-  // Update the map frame, so that it's oriented like frame named "world_frame_id_".
-//  tf::Transform map_transform;
-//  map_transform.setOrigin(tf::Vector3(-new_tr.getOrigin().x(), -new_tr.getOrigin().y(), 0.0));
-//  tf::Quaternion q;
-//  q.setRPY(0, 0, -theta);
-//  map_transform.setRotation(q);
-//  tr_broadcaster_.sendTransform(tf::StampedTransform(map_transform, scan.header.stamp, scan.header.frame_id, map_frame_id_));
-        // keep frame same with odom
-        tf::Transform map_transform;
-        map_transform.setOrigin(tf::Vector3(xinit_, yinit_, 0.0));
-        tf::Quaternion q;
-        q.setRPY(0, 0, 0);
-        map_transform.setRotation(q);
-        tr_broadcaster_.sendTransform(tf::StampedTransform(map_transform, ros::Time::now(), "/odom", map_frame_id_));
+    // Rotate viewpoint
+    map_base_.info = map_.info;
+    map_base_.header.stamp = ros::Time::now();
+    map_base_.header.frame_id = "base_link";
+    map_base_.data.assign(map_base_.info.height * map_base_.info.width, -1);
+    for(int i = 0; i < map_.info.height; i++) {
+        for(int j = 0; j < map_.info.width; j++) {
+            int index_source = i * map_.info.width + j;
+            double rel_x = j * map_.info.resolution + map_.info.origin.position.x;
+            double rel_y = i * map_.info.resolution + map_.info.origin.position.y;
+            // clockwise rotate viewpoint, consistent with ros convention
+            counterClockwiseRotatePoint(0, 0, -theta, rel_x, rel_y);
+            int ind_x = floor((rel_x - map_base_.info.origin.position.x) / map_base_.info.resolution);
+            int ind_y = floor((rel_y - map_base_.info.origin.position.y) / map_base_.info.resolution);
+            int index_transformed = ind_y * map_base_.info.width + ind_x;
+            if (ind_x > 0 && ind_x < map_base_.info.width && ind_y > 0 && ind_y < map_base_.info.height) {
+                map_base_.data[index_transformed] = map_.data[index_source] ;
+
+            }
+        }
     }
+
+    // Update the map frame, so that it's oriented like frame named "world_frame_id_".
+  tf::Transform map_transform;
+  map_transform.setOrigin(tf::Vector3(0.0, 0.0, 0.0));
+  tf::Quaternion q;
+  q.setRPY(0, 0, -theta);
+  map_transform.setRotation(q);
+  tr_broadcaster_.sendTransform(tf::StampedTransform(map_transform, scan.header.stamp, scan.header.frame_id, map_frame_id_));
+}
 
 bool MapBuilder::updateMap(const sensor_msgs::LaserScan& scan, long int dx, long int dy, double theta)
 {
   const bool has_moved = (dx != 0 || dy != 0);
   const int ncol = map_.info.width;
+
   if (has_moved)
   {
     // Move the map and log_odds_.
-    // delete by zwk to obtain global map
-//    moveAndCopyImage(-1, dx, dy, ncol, map_.data);
-//    moveAndCopyImage(0, dx, dy, ncol, log_odds_);
+    moveAndCopyImage(-1, dx, dy, ncol, map_.data);
+    moveAndCopyImage(0, dx, dy, ncol, log_odds_);
+
   }
-  // add by zwk for local map
-//  map_.data.assign(map_.info.width * map_.info.height, -1);
+
+//  if(fabs(theta) > 0.01) {
+//    rotateImage();
+//  }
+
 
     // Update occupancy.
   for (size_t i = 0; i < scan.ranges.size(); ++i)
@@ -370,21 +381,8 @@ bool MapBuilder::updateMap(const sensor_msgs::LaserScan& scan, long int dx, long
     const double angle = angles::normalize_angle(scan.angle_min + i * scan.angle_increment + theta);
     vector<size_t> pts;
     bool obstacle_in_map = getRayCastToObstacle(map_, angle, scan.ranges[i], pts);
-    // add by zwk move update origin
-    vector<size_t> pts_in_map;
-    for(auto &value: pts) {
-         int row_shift = value / map_.info.width - map_.info.height / 2;
-         int column_shift = value % map_.info.width - map_.info.width / 2;
-         int current_column = last_xmap_ + column_shift + map_.info.width / 2;
-         int current_row = last_ymap_ + row_shift + map_.info.height / 2;
-         // only reserve point in map
-         if(current_column > 0 && current_column < map_.info.height &&
-                current_row > 0 && current_row < map_.info.width) {
-            value += last_ymap_ * map_.info.width + last_xmap_;
-            pts_in_map.push_back(value);
-        }
-    }
-    if (pts_in_map.empty())
+
+    if (pts.empty())
     {
       continue;
     }
@@ -395,14 +393,15 @@ bool MapBuilder::updateMap(const sensor_msgs::LaserScan& scan, long int dx, long
     if (obstacle_in_map)
     {
       // The last point is the point with obstacle.
-      const size_t last_pt = pts_in_map.back();
-      updatePointOccupancy(true, true, last_pt, map_.data, log_odds_);
-        pts_in_map.pop_back();
+      const size_t last_pt = pts.back();
+      updatePointOccupancy(false, true, last_pt, map_.data, log_odds_);
+      pts.pop_back();
     }
     // The remaining points are in free space.
-    updatePointsOccupancy(true, false, pts_in_map, map_.data, log_odds_);
+    updatePointsOccupancy(false, false, pts, map_.data, log_odds_);
   }
-  return has_moved;
+
+    return has_moved;
 }
 
 /** Return the pixel list by ray casting from map origin to map border, first obstacle.

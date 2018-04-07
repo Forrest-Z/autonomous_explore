@@ -13,7 +13,6 @@ class VisMarker
 {
 public:
 	VisMarker() {
-		marker.header.frame_id = "/local_map/local_map";
         marker.header.stamp = Time(0);
 //        marker.ns = "none";
         marker.action = visualization_msgs::Marker::ADD;
@@ -24,7 +23,8 @@ public:
 		marker.color.a = 1.0; 		
 	}
 
-	void setParams(std::string ns, geometry_msgs::Pose pose, double scale, std_msgs::ColorRGBA color, int id = 0, float alpha = 1.0, int type = 3) {
+	void setParams(std::string frame, std::string ns, geometry_msgs::Pose pose, double scale, std_msgs::ColorRGBA color, int id = 0, float alpha = 1.0, int type = 3) {
+		marker.header.frame_id = frame;
 		marker.id = id;
         marker.ns = ns;
 		marker.pose = pose;

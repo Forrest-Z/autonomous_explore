@@ -9,7 +9,6 @@
 #include <message_filters/subscriber.h>
 #include <std_msgs/ColorRGBA.h>
 #include <tf/transform_listener.h>
-#include <move_base_msgs/MoveBaseAction.h>
 #include <actionlib/server/simple_action_server.h>
 #include <actionlib/client/simple_action_client.h>
 #include <actionlib/client/terminal_state.h>
@@ -17,18 +16,17 @@
 #include <internal_grid_map/internal_grid_map.hpp>
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <path_transform/path_planning.hpp>
-
+#include <car_model/car_geometry.hpp>
+#include <iv_explore_msgs/ExploreAction.h>
+#include <iv_explore_msgs/PlannerControlAction.h>
 
 #include "autonomous_exploration/bfs_frontier_search.hpp"
 #include "autonomous_exploration/util.hpp"
 #include "autonomous_exploration/Config.hpp"
-#include <autonomous_exploration/ExploreAction.h>
 #include <autonomous_exploration/GridMap.h>
 #include <autonomous_exploration/VisMarker.h>
 #include <autonomous_exploration/PoseWrap.h>
 #include <autonomous_exploration/Color.h>
-
-typedef actionlib::SimpleActionClient<move_base_msgs::MoveBaseAction> MoveBaseClient;
 
 using namespace tf;
 using namespace ros;
@@ -93,53 +91,69 @@ class ExploreAction {
 public:
 
     ExploreAction(std::string name, config::Config cfg) : as_(nh_, name, boost::bind(&ExploreAction::run, this, _1), false),
-                                      ac_("move_base", true), config_(cfg){
+                                                          explore_action_name_(name),astar_planner_action_name_("astar_move_base"),
+                                                          ac_("astar_move_base", true), config_(cfg){
+
 //		mMarkerPub_ = nh_.advertise<visualization_msgs::Marker>("vis_marker", 2);
-        mMarkerPub_ = nh_.advertise<visualization_msgs::MarkerArray>("vis_marker", 2);
-        binary_gom_pub_ = nh_.advertise<nav_msgs::OccupancyGrid>("binary_ogm", 2);
+        original_frontier_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("origin_frontier_marker", 1);
+        filtered_frontier_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("filtered_frontier_marker", 1);
+        sparsed_frontier_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("sparsed_frontier_marker", 1);
+        sorted_frontier_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("sorted_frontier_marker", 1);
+
         mGetMapClient_ = nh_.serviceClient<nav_msgs::GetMap>(std::string("current_map"));
         mGetBinaryMapClient_ = nh_.serviceClient<nav_msgs::GetMap>(std::string("binary_map"));
 
-        start_sub_ = nh_.subscribe("/initialpose", 1, &ExploreAction::startCb, this);
+//        start_sub_ = nh_.subscribe("/initialpose", 1, &ExploreAction::startCb, this);
         path_publisher_ = nh_.advertise<nav_msgs::Path>("PT_path", 1, true);
+
+        ros::NodeHandlePtr pnode_ = ros::NodeHandlePtr(new ros::NodeHandle("~"));
         double laser_range = 8.0;
-//		nh_.param("laser_max_range", laser_range, 8.);
+//		pnode_->param("laser_max_range", laser_range, 8.);
         mCurrentMap_.setLaserRange(laser_range);
 
         int lethal_cost;
-        nh_.param("lethal_cost", lethal_cost, 70);
+        pnode_->param("obs_threshold", lethal_cost, 80);
         mCurrentMap_.setLethalCost(lethal_cost);
 
-        nh_.param("gain_threshold", initial_gain_, 20.);
+        pnode_->param("gain_threshold", initial_gain_, 20.);
         mCurrentMap_.setGainConst(initial_gain_);
 
         double robot_radius = config_.vehicle_length / 2;
-//		nh_.param("robot_radius", robot_radius, 2.);
+//		pnode_->param("robot_radius", robot_radius, 2.);
         mCurrentMap_.setRobotRadius(robot_radius);
 
         std::string map_path;
         std::string temp = "/";
-        nh_.param("map_path", map_path, temp);
+        pnode_->param("map_path", map_path, temp);
         mCurrentMap_.setPath(map_path);
 
         minDistance_ = 5.0;
-//		nh_.param("min_distance", minDistance_, 5.);
-        nh_.param("min_gain_threshold", minGain_, 0.5);
-        nh_.param("gain_change", gainChangeFactor_, 1.5);
+//		pnode_->param("min_distance", minDistance_, 5.);
+        pnode_->param("min_gain_threshold", minGain_, 0.5);
+        pnode_->param("roi_size_gain_change", gainChangeFactor_, 1.2);
 
         start_point_ = hmpl::Pose2D(10, 10, M_PI);
 
         // keep initial pose
+        std::string local_map_frame_name_, global_map_frame_name_;
+        pnode_->param<std::string>("local_map_frame_name", local_map_frame_name_, "base_link");
+        pnode_->param<std::string>("global_map_frame_name", global_map_frame_name_, "/odom");
+        pnode_->param<double>("sparse_distance_between_frontiers", sparse_dis_, 1);
+        pnode_->param<double>("expect_info_radius", expect_info_radius_, 2);
+        pnode_->param<int>("min_unknown_cells_", min_unknown_cells_, 50);
+        pnode_->param<double>("initial_roi_radius_", initial_roi_radius_, 25);
+        pnode_->param<double>("max_roi_radius_", max_roi_radius_, 50);
+
+
         double xinit_ = 0, yinit_ = 0;
         tf::TransformListener mTfListener;
         tf::StampedTransform transform;
-        std::string world_frame_id_ = "/odom";
         int temp0 = 0;
         // wait here until receive tf tree
         while (temp0 == 0) {
             try {
                 temp0 = 1;
-                mTfListener.lookupTransform(world_frame_id_, std::string("/base_link"), ros::Time(0), transform);
+                mTfListener.lookupTransform(global_map_frame_name_, local_map_frame_name_, ros::Time(0), transform);
             } catch (tf::TransformException ex) {
                 temp0 = 0;
                 ros::Duration(0.1).sleep();
@@ -154,8 +168,11 @@ public:
 
         igm_.vis_.reset(new hmpl::ExplorationTransformVis("PT_map"));
 
-        as_.registerPreemptCallback(boost::bind(&ExploreAction::preemptCB, this));
+        // initial car geometry parameters
+        InitCarGeometry(car_);
 
+        // register Preempt callbacks
+        as_.registerPreemptCallback(boost::bind(&ExploreAction::preemptCB, this));
         as_.start();
 
     }
@@ -251,18 +268,34 @@ public:
     }
 #endif
 
-    void run(const autonomous_exploration::ExploreGoalConstPtr &goal) {
+    void run(const iv_explore_msgs::ExploreGoalConstPtr &goal) {
+
         Rate loop_rate(4);
-
-
         int count = 0;
-        std::vector<geometry_msgs::Point> frontier_array;
+        // final results sent tp planning module
         std::vector<PoseWrap> final_goals;
+        // set scalable ROI size for bfs extracting frontier routine
+        double roi_radius = initial_roi_radius_;
+
         auto start = hmpl::now();
-        while (ok() && as_.isActive()) {
+        while (ok() && as_.isActive() && roi_radius <= max_roi_radius_ ) {
             loop_rate.sleep();
 
-            unsigned int pos_index;
+            std::vector<geometry_msgs::Point> frontier_array;
+            std::vector<geometry_msgs::Point> filtered_frontier_array;
+            std::vector<geometry_msgs::Point> sparsed_frontier_array;
+
+            // check that preempt has not been requested by the client
+            if (as_.isPreemptRequested() || !ros::ok())
+            {
+                ROS_WARN("Explore Server received a cancel request.");
+                goalReached_ = -1;
+                ac_.cancelGoal();
+                ROS_INFO("%s: Preempted", explore_action_name_.c_str());
+                // set the action state to preempted
+                as_.setPreempted();
+                return;
+            }
 
             if (!getMap()) {
                 ROS_ERROR("Could not get a map");
@@ -270,6 +303,7 @@ public:
                 return;
             }
 
+            unsigned int pos_index;
             if (!mCurrentMap_.getCurrentPosition(pos_index)) {
                 ROS_ERROR("Could not get a position");
                 as_.setPreempted();
@@ -282,10 +316,9 @@ public:
                 return;
             }
 
-//            binary_gom_pub_.publish(binary_ogm_);
             // Initialize gridmap with ogm (all is same)
             grid_map::GridMapRosConverter::fromOccupancyGrid(binary_ogm_, igm_.obs, igm_.maps);
-            // value replacement
+            // value replacement  todo convert to cv::mat, use setTo
             grid_map::Matrix& grid_data = igm_.maps[igm_.obs];
             size_t size_x = igm_.maps.getSize()(0);
             size_t size_y = igm_.maps.getSize()(1);
@@ -301,22 +334,97 @@ public:
                     }
                 }
             }
-
-            ROS_INFO("Created map with size %f x %f m (%i x %i cells).",
-                     igm_.maps.getLength().x(), igm_.maps.getLength().y(),
-                     igm_.maps.getSize()(0), igm_.maps.getSize()(1));
-            auto start = hmpl::now();
             igm_.updateDistanceLayerCV();
-            auto end = hmpl::now();
-            std::cout << "fast DT update time [s]:" << hmpl::getDurationInSecs(start, end) << std::endl;
 
-            // find frontier points
+            // update roi_radius for bfs frontiers extracting func
+            bfs_searcher_.setPolygonRadius(roi_radius);
+            // find frontier points(no filter)
             frontier_array = exploreByBfs(&mCurrentMap_, pos_index);
+            ROS_INFO("origin frontier size : %d", frontier_array.size());
 
+            // filter frontier points(collision, isolated-frontiers--no info_gain)
+            float originX = mCurrentMap_.getOriginX();
+            float originY = mCurrentMap_.getOriginY();
+            float resolution = mCurrentMap_.getResolution();
+            nav_msgs::OccupancyGrid tmp = mCurrentMap_.getMap();
+            cv::Mat m = cv::Mat(tmp.info.height, tmp.info.width,
+                        CV_8SC1); // initialize matrix of signed char of 1-channel where you will store vec data
+            cv::Mat m0 = cv::Mat(tmp.info.height, tmp.info.width,
+                                 CV_8UC1);
+            //copy vector to mat
+            memcpy(m.data, tmp.data.data(), tmp.data.size() * sizeof(signed char));
+            m.setTo(cv::Scalar(120), m == -1);
+            m.convertTo(m0, CV_8UC1);
+
+            int info_radius = static_cast<int> (expect_info_radius_ / resolution);
+            // todo filter initial frontier on vehicle body when vehicle start at first
+            BOOST_FOREACH(geometry_msgs::Point point, frontier_array) {
+                             // Define the robot as square
+                            grid_map::Position pos(point.x, point.y);
+
+                            float x = point.x;
+                            float y = point.y;
+                            unsigned int index;
+
+                            unsigned int X = (x - originX) / resolution;
+                            unsigned int Y = (y - originY) / resolution;
+                            if (this->igm_.maps.isInside(pos)) {
+                                double clearance = this->igm_.getObstacleDistance(pos);
+                                if (clearance < config_.vehicle_length / 2) {
+                                    // the big circle is not collision-free, then do an exact
+                                    // collision checking
+                                } else { // collision-free
+                                    if( mCurrentMap_.getIndex(X, Y, index) ) {
+                                         int unknown_cells = countUnknownCells(m0, info_radius, X, Y);
+                                         if(unknown_cells > min_unknown_cells_) {
+                                             // filter isolated frontiers(circle)
+                                            filtered_frontier_array.push_back(point);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+#ifdef DEBUG
+            if(filtered_frontier_pub_.getNumSubscribers() > 0) {
+                publishMarkerArray(filtered_frontier_pub_, "filtered_frontiers", filtered_frontier_array);
+            }
+#endif
+            ROS_INFO("filtered frontier size : %d", filtered_frontier_array.size());
+
+            if(filtered_frontier_array.empty()) {
+                ROS_WARN("No frontiers after filtering, Enlarging search area ...");
+                roi_radius *= gainChangeFactor_;
+                ROS_INFO("ROI_radius was increased to: %f", roi_radius);
+                continue;
+            }
+            // sparse frontier points
+           sampleFrontierArea(filtered_frontier_array, sparsed_frontier_array);
+#ifdef DEBUG
+            if(sparsed_frontier_pub_.getNumSubscribers() > 0) {
+                publishMarkerArray(sparsed_frontier_pub_, "sparsed_frontiers", sparsed_frontier_array);
+            }
+#endif
+            ROS_INFO("sparsed frontier size : %d", sparsed_frontier_array.size());
+
+            if (sparsed_frontier_array.size() > 0) {
+                final_goals = getCheapest(m0, info_radius, sparsed_frontier_array, pos_index);
+                // send goal to astar_action_client, awaiting for results
+                moveTo(final_goals);
+                break;
+            } else {
+                ROS_WARN("Got NO frontier after sparsing! Enlarging search area, BUT Sparsing operation is ERROR!!!");
+                // todo try something, enlarge search area or ...
+                roi_radius *= gainChangeFactor_;
+                ROS_INFO("ROI_radius was increased to: %f", roi_radius);
+                continue;
+            }
+
+
+#ifdef PT
             // find gridmap index
             std::vector<grid_map::Index> goals;
             grid_map::Index goal_index;
-            BOOST_FOREACH(geometry_msgs::Point point, frontier_array) {
+            BOOST_FOREACH(geometry_msgs::Point point, sparsed_frontier_array) {
                             grid_map::Position pose(point.x, point.y);
                             bool flag1 = igm_.maps.getIndex(pose, goal_index);
                             if(!flag1) {
@@ -327,9 +435,9 @@ public:
                         }
             ROS_INFO("goals of PT nums : %d \n", goals.size());
 
-            start = hmpl::now();
+            auto start = hmpl::now();
             igm_.updateExplorationTransform(goals, 5, 10, 1.0);
-            end = hmpl::now();
+            auto end = hmpl::now();
             igm_.vis_->publishVisOnDemand(igm_.maps, igm_.explore_transform);
             ROS_INFO( "PT map cost time %f \n" , hmpl::getDurationInSecs(start, end));
 
@@ -359,50 +467,47 @@ public:
                 }
                 path_publisher_.publish(path_msg);
             }
+#endif
 
-
-            if (frontier_array.size() > 0) {
-//                final_goals = getCheapest(frontier_centroids, pos_index);
-                break;
-            } else {
-                ROS_INFO("Got NO frontier_centroids!");
-                // todo try something
-            }
         }
-
         auto end = hmpl::now();
         std::cout << " explore cost time:" << hmpl::getDurationInSecs(start, end) << "\n";
 
         if (as_.isActive()) {
-            if (final_goals.size() > 0) {
+            if (final_goals.size() > 0 && 1 == goalReached_) {
                 as_.setSucceeded();
-                ROS_INFO("Exploration was finished");
+                ROS_WARN("Exploration was finished");
             } else {
                 as_.setAborted();
-                ROS_INFO("Exploration was interrupted");
+                ROS_WARN("Exploration was failed: maybe really no frontier(search area is max!) or goal is unaccessible!!!");
             }
         } else {
-            as_.setAborted();
-            ROS_INFO("Exploration was aborted");
+            ROS_WARN("Explore action server was prempted!!");
+//            as_.setPreempted();
         }
     }
 
 
+    // deprecated! could not enter when "run" func is running !
     void preemptCB() {
-        ROS_INFO("Server received a cancel request.");
+        ROS_INFO("Explore Server received a cancel request.");
 //		mCurrentMap_.generateMap();
         goalReached_ = -1;
-//		ac_.cancelGoal();
+		ac_.cancelGoal();
         as_.setPreempted();
     }
 
-    void doneCb(const actionlib::SimpleClientGoalState &state, const move_base_msgs::MoveBaseResult::ConstPtr &result) {
+    void doneCb(const actionlib::SimpleClientGoalState &state, const iv_explore_msgs::PlannerControlResultConstPtr &result) {
         if (state == actionlib::SimpleClientGoalState::SUCCEEDED) {
-            ROS_INFO("Robot reached the explore target");
+            ROS_INFO("vehicle reached the explore target");
             goalReached_ = 1;
         } else {
             goalReached_ = -1;
         }
+    }
+
+    void feedbackCb(const iv_explore_msgs::PlannerControlFeedbackConstPtr &feedback) {
+        ROS_INFO("goal(%f, %f) is chosen!", feedback->current_goal.position.x, feedback->current_goal.position.y);
     }
 
     void startCb(const geometry_msgs::PoseWithCovarianceStampedConstPtr &start) {
@@ -413,6 +518,115 @@ public:
     }
 
 private:
+
+
+    void InitCarGeometry(hmpl::CarGeometry &car) {
+        car.setBase2Back(config_.base2back);
+        car.setVehicleLength(config_.vehicle_length);
+        car.setVehicleWidth(config_.vehicle_width);
+        car.setWheebase(config_.vehicle_wheelbase);
+        car.buildCirclesFromFootprint();
+    }
+
+    bool isSingleStateCollisionFree(const hmpl::State &current) {
+        // get the footprint circles based on current vehicle state in global frame
+        std::vector<hmpl::Circle> footprint = this->car_.getCurrentCenters(current);
+        // footprint checking
+        for (auto &circle_itr : footprint) {
+            grid_map::Position pos(circle_itr.position.x, circle_itr.position.y);
+            // complete collision checking
+            if (this->igm_.maps.isInside(pos)) {
+                double clearance = this->igm_.getObstacleDistance(pos);
+                if (clearance < circle_itr.r) {  // collision
+                    // less than circle radius, collision
+                    return false;
+                }
+            } else {
+                // beyond boundaries , collision
+                return false;
+            }
+        }
+        // all checked, current state is collision-free
+        return true;
+    }
+
+    bool isSingleStateCollisionFreeImproved(const hmpl::State &current) {
+        // current state is in ogm: origin(0,0) is on center
+        // get the bounding circle position in global frame
+        hmpl::Circle bounding_circle = this->car_.getBoundingCircle(current);
+
+        grid_map::Position pos(bounding_circle.position.x, bounding_circle.position.y);
+        if (this->igm_.maps.isInside(pos)) {
+            double clearance = this->igm_.getObstacleDistance(pos);
+            if (clearance < bounding_circle.r) {
+                // the big circle is not collision-free, then do an exact
+                // collision checking
+                return (this->isSingleStateCollisionFree(current));
+            } else { // collision-free
+                return true;
+            }
+        } else {  // beyond the map boundary
+            return false;
+        }
+    }
+
+    void sampleFrontierArea(std::vector<geometry_msgs::Point> &filtered_frontier_array,
+                            std::vector<geometry_msgs::Point> &sparsed_frontier_array) {
+        // not sparse when total frontier is little
+        if (filtered_frontier_array.size() < 20) {
+            ROS_INFO("filtered_frontiers numbers is little(less than 20), not sparse !!!");
+            sparsed_frontier_array = filtered_frontier_array;
+            return;
+        }
+        sparsed_frontier_array.reserve(filtered_frontier_array.size());
+        sparsed_frontier_array.push_back(filtered_frontier_array[0]);
+
+        size_t idx = 0;
+        while (idx < filtered_frontier_array.size() - 2) {
+            //std::cout << "idx: " << idx << " size: " << path_in.size() <<  "\n";
+            const geometry_msgs::Point &current_index(filtered_frontier_array[idx]);
+
+            for (size_t test_idx = idx + 2; test_idx < filtered_frontier_array.size(); ++test_idx) {
+                const geometry_msgs::Point &test_index = filtered_frontier_array[test_idx];
+
+                if (util::calcDistance(current_index.x, current_index.y, test_index.x, test_index.y) > sparse_dis_) {
+                    idx = test_idx - 1;
+                    break;
+                } else {
+                    if (test_idx == (filtered_frontier_array.size() - 1)) {
+                        idx = test_idx;
+                        break;
+                    }
+                }
+            }
+
+            sparsed_frontier_array.push_back(filtered_frontier_array[idx]);
+        }
+
+        if (idx < filtered_frontier_array.size()) {
+            sparsed_frontier_array.push_back(filtered_frontier_array.back());
+        }
+
+        return ;
+    }
+
+    int countUnknownCells(const cv::Mat &mapData, int radius,  unsigned int x, unsigned int y) {
+        cv::Rect rect1;
+        int num_cells_radius = radius;
+        // x,y is top left corner point
+        rect1.x = x - num_cells_radius ;
+        rect1.y = y - num_cells_radius;
+        rect1.height = rect1.width = 2 * num_cells_radius;
+        rect1 = rect1 & cv::Rect(0, 0, mapData.cols, mapData.rows);  // inside mat
+        cv::Mat roiMat = mapData(rect1).clone();
+//        std::cerr << roiMat.type() << " " << roiMat.channels() << " " << roiMat.size() << std::endl;
+
+        cv::threshold( roiMat, roiMat, 110, 255, cv::THRESH_BINARY);
+        int count_white = cv::countNonZero(roiMat); // white cell is unknown cell
+
+        return count_white;
+    }
+
 
     int exploreByInfoGain(GridMap *map, unsigned int start) {
         ROS_INFO("Starting exploration");
@@ -486,19 +700,141 @@ private:
         }
     }
 
+
+    std::vector<PoseWrap> getCheapest(const cv::Mat &mapData, int radius, std::vector<geometry_msgs::Point> &frontier_centroids,
+                                      unsigned int current_pos) {
+        std::vector<PoseWrap> goals;
+        goals.reserve(frontier_centroids.size());
+
+        int too_close_counter = 0;
+        int no_new_cell_counter = 0;
+        int touch_obstacle = 0;
+        int outside_of_the_map = 0;
+
+        double max_robot_goal_dist = 0;
+        int max_explored_cells = 0;
+        std::list<ExplorationPoint> expl_point_list;
+        unsigned int map_width = mCurrentMap_.getWidth();
+        unsigned int map_height = mCurrentMap_.getHeight();
+        double origin_x = mCurrentMap_.getOriginX();
+        double origin_y = mCurrentMap_.getOriginY();
+        double resolution = mCurrentMap_.getResolution();
+        // calculate angle_diff cost
+        BOOST_FOREACH(geometry_msgs::Point pt, frontier_centroids) {
+                        double mxs, mys;
+                        geometry_msgs::Pose start_pose = mCurrentMap_.getCurrentLocalPosition();
+                        mxs = start_pose.position.x;
+                        mys = start_pose.position.y;
+
+                        double gx, gy;
+                        gx = pt.x;
+                        gy = pt.y;
+                        double distance2goal = util::calcDistance(mxs, mys, gx, gy);
+                        if(distance2goal > max_robot_goal_dist) {
+                            max_robot_goal_dist = distance2goal;
+                        }
+//                        // Goal poses which are too close to the robot are discarded.
+//                        if(distance2goal < config_.min_goal_distance) {
+//                            too_close_counter++;
+//                            continue;
+//                        }
+
+                        unsigned int X = (gx - origin_x) / resolution;
+                        unsigned int Y = (gy - origin_y) / resolution;
+                        // Ignore ecploration point if it is no real exploration point.
+                        int numberOfExploredCells = countUnknownCells(mapData, radius, X, Y);
+                        if (numberOfExploredCells > max_explored_cells) {
+                            max_explored_cells = numberOfExploredCells;
+                        }
+                        if (numberOfExploredCells <= 50) {
+                            no_new_cell_counter++;
+                            continue;
+                        }
+
+                        // Calculate angular distance, will be [0,PI)
+                        double goal_proj_x = gx-mxs;
+                        double goal_proj_y = gy-mys;
+                        double start_angle = util::modifyTheta(tf::getYaw(start_pose.orientation));
+                        double goal_angle = util::modifyTheta(std::atan2(goal_proj_y,goal_proj_x));
+                        PoseWrap goal_pose(gx, gy, goal_angle);
+                        double angle_distance = util::calcDiffOfRadian(start_angle, goal_angle);
+
+                        // Create exploration point and add it to a list to be sorted as soon
+                        // as max_robot_goal_dist and max_explored_cells are known.
+                        ExplorationPoint expl_point(goal_pose, numberOfExploredCells, angle_distance, distance2goal);
+                        expl_point_list.push_back(expl_point);
+                    }
+        ROS_INFO("%d of %d exploration points are uses:  %d are too close to the robot, %d leads to no new cells",
+                 expl_point_list.size(), frontier_centroids.size(),  too_close_counter, no_new_cell_counter);
+        std::list<ExplorationPoint>::iterator it = expl_point_list.begin();
+        double max_value = 0;
+        double min_value = std::numeric_limits<double>::max();
+        double value = 0;
+        for (; it != expl_point_list.end(); it++) {
+            value = it->calculateOverallValue(config_.weights, max_explored_cells, max_robot_goal_dist);
+            if (value > max_value)
+                max_value = value;
+            if (value < min_value)
+                min_value = value;
+        }
+        // Higher values are better, so the optimal goal is the last one.
+        expl_point_list.sort();
+        PoseWrap expl_rbs;
+        std::vector<unsigned int> goal_list;
+        std::vector<int> type_array;
+        int type = 0;
+        ROS_INFO("Exploration point list:\n");
+        for (auto rit = expl_point_list.crbegin(); rit != expl_point_list.crend(); ++rit) {
+            expl_rbs = rit->explPose;
+            goals.push_back(expl_rbs);
+            ROS_INFO(
+                    "Point(%4.2f, %4.2f, %4.2f) values: overall(%4.2f), expl(%4.2f), ang(%4.2f), dist(%4.2f)\n",
+                    rit->explPose.x, rit->explPose.y, rit->explPose.theta, rit->overallValue,
+                    rit->expl_value, rit->ang_value, rit->dist_value);
+            unsigned int x = (rit->explPose.x - origin_x) / mCurrentMap_.getResolution();
+            unsigned int y = (rit->explPose.y - origin_y) / mCurrentMap_.getResolution();
+            unsigned int index;
+            mCurrentMap_.getIndex(x, y, index);
+            goal_list.push_back(index);
+            type_array.push_back(type);
+            type++;
+        }
+
+        if (!goals.empty()) {
+            int max = goal_list.size() > 10 ? 10 : goal_list.size();
+            for(int i = 0; i < max; i++) {
+                type_array[i] = -2;
+            }
+        } else {
+            ROS_WARN( "did not find any target, propably stuck in an obstacle.");
+        }
+#ifdef DEBUG
+        if(sorted_frontier_pub_.getNumSubscribers() > 0) {
+            publishMarkerArray(sorted_frontier_pub_, "sorted_frontiers", goal_list, type_array);
+        }
+#endif
+
+        return goals;
+    }
+
     std::vector<geometry_msgs::Point> exploreByBfs(GridMap *map, unsigned int start) {
         ROS_INFO("Starting exploration");
 
 //        map->clearArea(start);
 //        ROS_INFO("Cleared the area");
-        FrontierSearch bfs_searcher(map->getMap());
+        bfs_searcher_.getMap(map->getMap());
 
         hmpl::Pose2D current_pos;
         geometry_msgs::Pose start_pose = mCurrentMap_.getCurrentLocalPosition();
         current_pos.position.x = start_pose.position.x;
         current_pos.position.y = start_pose.position.y;
         current_pos.orientation = util::modifyTheta(tf::getYaw(start_pose.orientation));
-        std::list<Frontier> frontier_list = bfs_searcher.searchFrom(start, current_pos);
+
+        ROS_INFO_THROTTLE(5, "vehicle position in odom frame (%f[m], %f[m], %f[degree])",
+                          current_pos.position.x, current_pos.position.y,
+                          current_pos.orientation * 180 / M_PI);
+
+        std::list<Frontier> frontier_list = bfs_searcher_.searchFrom(start, current_pos);
         ROS_INFO("frontier_list size: %d", frontier_list.size());
 
         //create placeholder for selected frontier
@@ -545,51 +881,65 @@ private:
                         type++;
                     }
 #ifdef DEBUG
-        publishMarkerArray(frontier_array_centroid, type_array);
+        if(original_frontier_pub_.getNumSubscribers() > 0) {
+            publishMarkerArray(original_frontier_pub_, "original_frontiers", frontier_array_centroid, type_array);
+        }
 #endif
         return frontier_array;
     }
 
-    bool moveTo(unsigned int goal_index) {
-        // add by zwk todo
-        ROS_INFO("Failed to reach the goal");
-        return false;
-
+    bool moveTo(std::vector<PoseWrap> &goal_lists) {
         Rate loop_rate(8);
-
         while (!ac_.waitForServer()) {
-            ROS_INFO("Waiting for the move_base action server to come up");
+            ROS_INFO("Waiting for the astar_move_base action server to come up");
             loop_rate.sleep();
         }
 
-        double x, y;
-        mCurrentMap_.getOdomCoordinates(x, y, goal_index);
+        iv_explore_msgs::PlannerControlGoal move_goal;
 
-        ROS_INFO("Got the explore goal: %f, %f\n", x, y);
+        move_goal.goals.header.frame_id = mCurrentMap_.getMap().header.frame_id;
+        move_goal.goals.header.stamp = ros::Time::now();
 
-        move_base_msgs::MoveBaseGoal move_goal;
+        // todo at now, max chosen numbers is 10
+        int max = goal_lists.size() > 10 ? 10 : goal_lists.size();
+        geometry_msgs::Pose pose;
+        for(int i = 0; i < max; i++) {
+            pose.position.x = goal_lists[i].x;
+            pose.position.y = goal_lists[i].y;
+            tf::quaternionTFToMsg(tf::createQuaternionFromYaw(goal_lists[i].theta),
+                                                              pose.orientation);
+            move_goal.goals.poses.push_back(pose);
+        }
 
-        move_goal.target_pose.header.frame_id = "local_map/local_map";
-        move_goal.target_pose.header.stamp = Time(0);
-
-        PoseWrap pose(x, y);
-        move_goal.target_pose.pose = pose.getPose();
-
-        ROS_INFO("Sending goal");
-        ac_.sendGoal(move_goal, boost::bind(&ExploreAction::doneCb, this, _1, _2));
+        ROS_INFO("Sending goal to astar_action_server");
+        ac_.sendGoal(move_goal, boost::bind(&ExploreAction::doneCb, this, _1, _2),
+                     actionlib::SimpleActionClient<iv_explore_msgs::PlannerControlAction>::SimpleActiveCallback(),
+                     boost::bind(&ExploreAction::feedbackCb, this, _1));
 
         goalReached_ = 0;
 
-        while (goalReached_ == 0 && ok()) {
+        while (0 == goalReached_  && ok()) {
             loop_rate.sleep();
+            // check that preempt has not been requested by the client
+            if (as_.isPreemptRequested() || !ros::ok())
+            {
+                ROS_WARN("Explore Server received a cancel request, Cancel movement sent to PlanControl module!!");
+                goalReached_ = -1;
+                ac_.cancelGoal();
+                ROS_INFO("%s: Preempted", explore_action_name_.c_str());
+                // set the action state to preempted
+                as_.setPreempted();
+                break;
+            }
+
         }
 
         if (goalReached_ == 1) {
-            ROS_INFO("Reached the goal");
+            ROS_INFO("Vehicle has Reached the goal");
             return true;
         }
 
-        ROS_INFO("Failed to reach the goal");
+        ROS_INFO("Vehicle Failed to reach the goal maybe goal is cancelled or goal is really unaccessible!");
         return false;
     }
 
@@ -636,6 +986,7 @@ private:
         double x, y;
         mCurrentMap_.getOdomCoordinates(x, y, index);
         PoseWrap pose(x, y);
+        std::string frame = mCurrentMap_.getMap().header.frame_id;
 
         VisMarker marker;
         /*
@@ -645,22 +996,26 @@ private:
         */
         if (type == 1) {
             Color color(0, 0, 0.7);
-            marker.setParams("free", pose.getPose(), 0.35, color.getColor());
+            marker.setParams(true, frame, "free", pose.getPose(), 0.35, color.getColor());
         } else if (type == 2) {
             Color color(0, 0.7, 0);
-            marker.setParams("frontier", pose.getPose(), 0.75, color.getColor());
+            marker.setParams(true, frame, "frontier", pose.getPose(), 0.75, color.getColor());
         }
 
-        mMarkerPub_.publish(marker.getMarker());
+        original_frontier_pub_.publish(marker.getMarker());
     }
 
-    void publishMarkerArray(const std::vector<unsigned int> &index_array, std::vector<int> type) {
+    void publishMarkerArray(const ros::Publisher &pub, std::string marker_ns,
+                            const std::vector<unsigned int> &index_array, std::vector<int> type) {
+        static int last_point_nums = 0;
         visualization_msgs::MarkerArray markersMsg;
+
         for (int i = 0; i < index_array.size(); i++) {
             double x, y;
             mCurrentMap_.getOdomCoordinates(x, y, index_array[i]);
             PoseWrap pose(x, y);
 
+            std::string frame = mCurrentMap_.getMap().header.frame_id;
             VisMarker marker;
             /*
               type:
@@ -670,156 +1025,113 @@ private:
             type[i] = type[i] % 4;
             if (type[i] == 0) {
                 Color color(0, 0, 0.7);
-                marker.setParams("frontier", pose.getPose(), 0.35, color.getColor(), i);
+                marker.setParams(true, frame, marker_ns, pose.getPose(), 0.35, color.getColor(), i);
             } else if (type[i] == 1) {
                 Color color(0, 0.7, 0);
-                marker.setParams("frontier", pose.getPose(), 0.35, color.getColor(), i);
+                marker.setParams(true, frame, marker_ns, pose.getPose(), 0.35, color.getColor(), i);
             } else if (type[i] == 2) {
                 Color color(0.7, 0, 0);
-                marker.setParams("frontier", pose.getPose(), 0.35, color.getColor(), i);
+                marker.setParams(true, frame, marker_ns, pose.getPose(), 0.35, color.getColor(), i);
             } else if (type[i] == 3) {
                 Color color(0, 1.0, 0);
-                marker.setParams("frontier", pose.getPose(), 0.35, color.getColor(), i);
+                marker.setParams(true, frame, marker_ns, pose.getPose(), 0.35, color.getColor(), i);
             } else if (type[i] == -1) {
                 Color color(0, 1.0, 0);
-                marker.setParams("frontier", pose.getPose(), 0.15, color.getColor(), i, 0.6);
+                marker.setParams(true, frame, marker_ns, pose.getPose(), 0.15, color.getColor(), i, 0.6);
             } else if (type[i] == -2) {
-                Color color(0, 1.0, 0);
-                marker.setParams("frontier", pose.getPose(), 0.75, color.getColor(), i);
+                Color color(1.0, 0.0, 0);
+                marker.setParams(true, frame, marker_ns, pose.getPose(), 0.75, color.getColor(), i);
             } else {
                 ROS_WARN("TYPE INDEX ERROR!");
             }
 
+
             markersMsg.markers.push_back(marker.getMarker());
         }
-        mMarkerPub_.publish(markersMsg);
+
+        // delete old markers
+        if(last_point_nums > index_array.size()) {
+            for (int i = index_array.size(); i < last_point_nums; i++) {
+                visualization_msgs::Marker marker;
+                marker.ns = marker_ns;
+                marker.id = i;
+                marker.action = visualization_msgs::Marker::DELETE;
+                markersMsg.markers.push_back(marker);
+            }
+        }
+
+
+        pub.publish(markersMsg);
+        last_point_nums = index_array.size();
+
     }
 
-    std::vector<PoseWrap> getCheapest(std::vector<unsigned int> &frontier_centroids, unsigned int current_pos) {
-        std::vector<PoseWrap> goals;
-        goals.reserve(frontier_centroids.size());
+    void publishMarkerArray(const ros::Publisher &pub, std::string marker_ns,
+                            const std::vector<geometry_msgs::Point> &points) {
+        static int last_point_nums = 0;
+        visualization_msgs::MarkerArray markersMsg;
+        std::string frame = mCurrentMap_.getMap().header.frame_id;
 
-        int too_close_counter = 0;
-        int no_new_cell_counter = 0;
-        int touch_obstacle = 0;
-        int outside_of_the_map = 0;
+        for (int i = 0; i < points.size(); i++) {
+            PoseWrap pose(points[i].x, points[i].y);
+            VisMarker marker;
+            /*
+              type:
+                1: free area
+                2: frontier
+            */
+            Color color(0, 0, 0.7);
+            marker.setParams(true, frame, marker_ns, pose.getPose(), 0.35, color.getColor(), i);
 
-        double max_robot_goal_dist = 0;
-        double max_explored_cells = 0;
-        std::list<ExplorationPoint> expl_point_list;
-        unsigned int map_width = mCurrentMap_.getWidth();
-        unsigned int map_height = mCurrentMap_.getHeight();
-        double origin_x = mCurrentMap_.getOriginX();
-        double origin_y = mCurrentMap_.getOriginY();
-        // calculate angle_diff cost
-        BOOST_FOREACH(unsigned int index, frontier_centroids) {
-                        if(index > map_width * map_height) {
-                            outside_of_the_map++;
-                            ROS_WARN("Goal point is out of map!");
-                            continue;
-                        }
-                        double mxs, mys;
-                        geometry_msgs::Pose start_pose = mCurrentMap_.getCurrentLocalPosition();
-                        mxs = start_pose.position.x;
-                        mys = start_pose.position.y;
-
-                        double gx, gy;
-                        mCurrentMap_.getOdomCoordinates(gx, gy, index);
-
-                        double distance2goal = util::calcDistance(mxs, mys, gx, gy);
-                        if(distance2goal > max_robot_goal_dist) {
-                            max_robot_goal_dist = distance2goal;
-                        }
-                        // Goal poses which are too close to the robot are discarded.
-                        if(distance2goal < config_.min_goal_distance) {
-                            too_close_counter++;
-                            continue;
-                        }
-
-                        // Vehicle body collision checking
-                        if(!mCurrentMap_.isFree(index)) {
-                            touch_obstacle++;
-                            continue;
-                        }
-
-                        // Ignore ecploration point if it is no real exploration point.
-                        double numberOfExploredCells = mCurrentMap_.uFunction(index);
-                        if (numberOfExploredCells > max_explored_cells) {
-                            max_explored_cells = numberOfExploredCells;
-                        }
-                        if (numberOfExploredCells <= 5.0) {
-                            no_new_cell_counter++;
-                            continue;
-                        }
-
-                        // Calculate angular distance, will be [0,PI)
-                        double goal_proj_x = gx-mxs;
-                        double goal_proj_y = gy-mys;
-                        double start_angle = util::modifyTheta(tf::getYaw(start_pose.orientation));
-                        double goal_angle = util::modifyTheta(std::atan2(goal_proj_y,goal_proj_x));
-                        PoseWrap goal_pose(gx, gy, goal_angle);
-                        double angle_distance = util::calcDiffOfRadian(start_angle, goal_angle);
-
-                        // Create exploration point and add it to a list to be sorted as soon
-                        // as max_robot_goal_dist and max_explored_cells are known.
-                        ExplorationPoint expl_point(goal_pose, numberOfExploredCells, angle_distance, distance2goal); // See documentation in ExplorationPoint.edgeFound.
-                        expl_point_list.push_back(expl_point);
-                    }
-        ROS_INFO("%d of %d exploration points are uses: %d touches an obstacle, %d are too close to the robot, %d leads to no new cells, %d lies outside of the map",
-                 expl_point_list.size(), frontier_centroids.size(), touch_obstacle, too_close_counter, no_new_cell_counter,
-                 outside_of_the_map);
-        std::list<ExplorationPoint>::iterator it = expl_point_list.begin();
-        double max_value = 0;
-        double min_value = std::numeric_limits<double>::max();
-        double value = 0;
-        for (; it != expl_point_list.end(); it++) {
-            value = it->calculateOverallValue(config_.weights, max_explored_cells, max_robot_goal_dist);
-            if (value > max_value)
-                max_value = value;
-            if (value < min_value)
-                min_value = value;
+            markersMsg.markers.push_back(marker.getMarker());
         }
-        // Higher values are better, so the optimal goal is the last one.
-        expl_point_list.sort();
-        PoseWrap expl_rbs;
-        std::vector<unsigned int> goal_list;
-        std::vector<int> type_array;
-        int type = 0;
-        ROS_INFO("Exploration point list:\n");
-        for (auto rit = expl_point_list.crbegin(); rit != expl_point_list.crend(); ++rit) {
-            expl_rbs = rit->explPose;
-            goals.push_back(expl_rbs);
-            ROS_INFO(
-                    "Point(%4.2f, %4.2f, %4.2f) values: overall(%4.2f), expl(%4.2f), ang(%4.2f), dist(%4.2f)\n",
-                    rit->explPose.x, rit->explPose.y, rit->explPose.theta, rit->overallValue,
-                    rit->expl_value, rit->ang_value, rit->dist_value);
-            unsigned int x = (rit->explPose.x - origin_x) / mCurrentMap_.getResolution();
-            unsigned int y = (rit->explPose.y - origin_y) / mCurrentMap_.getResolution();
-            unsigned int index;
-            mCurrentMap_.getIndex(x, y, index);
-            goal_list.push_back(index);
-            type_array.push_back(type);
-            type++;
+        // delete old markers
+        if(last_point_nums > points.size()) {
+            for (int i = points.size(); i < last_point_nums; i++) {
+                visualization_msgs::Marker marker;
+                marker.ns = marker_ns;
+                marker.id = i;
+                marker.action = visualization_msgs::Marker::DELETE;
+                markersMsg.markers.push_back(marker);
+            }
         }
 
+        pub.publish(markersMsg);
 
-        if (!goals.empty()) {
-            type_array[0] = -2;
-            publishMarkerArray(goal_list, type_array);
-        } else {
-            ROS_INFO( "did not find any target, propably stuck in an obstacle.");
+        last_point_nums = points.size();
+    }
+
+
+    void publishMarkerArray(const ros::Publisher &pub,
+                            const std::vector<unsigned int> &index_array) {
+        visualization_msgs::MarkerArray markersMsg;
+        for (int i = 0; i < index_array.size(); i++) {
+            double x, y;
+            mCurrentMap_.getOdomCoordinates(x, y, index_array[i]);
+            PoseWrap pose(x, y);
+
+            std::string frame = mCurrentMap_.getMap().header.frame_id;
+            VisMarker marker;
+            /*
+              type:
+                1: free area
+                2: frontier
+            */
+            Color color(0, 0, 0.7);
+            marker.setParams(true, frame, "frontier", pose.getPose(), 0.35, color.getColor());
+
+            markersMsg.markers.push_back(marker.getMarker());
         }
-
-        return goals;
+        pub.publish(markersMsg);
     }
 
 
 protected:
     NodeHandle nh_;
-    actionlib::SimpleActionServer<autonomous_exploration::ExploreAction> as_;
-    autonomous_exploration::ExploreFeedback feedback_;
-    autonomous_exploration::ExploreResult result_;
-    MoveBaseClient ac_;
+    actionlib::SimpleActionServer<iv_explore_msgs::ExploreAction> as_;
+    iv_explore_msgs::ExploreFeedback feedback_;
+    iv_explore_msgs::ExploreResult result_;
+    actionlib::SimpleActionClient<iv_explore_msgs::PlannerControlAction> ac_;
 
     ServiceClient mGetMapClient_;
     GridMap mCurrentMap_;
@@ -829,7 +1141,11 @@ protected:
     double gainChangeFactor_;
     int goalReached_;
 
-    Publisher mMarkerPub_;
+    Publisher original_frontier_pub_;
+    Publisher filtered_frontier_pub_;
+    Publisher sparsed_frontier_pub_;
+    Publisher sorted_frontier_pub_;
+
     Publisher binary_gom_pub_;
     Publisher path_publisher_;
     Subscriber start_sub_;
@@ -839,23 +1155,46 @@ protected:
 
     hmpl::Pose2D start_point_;
 
+    // car model
+    hmpl::CarGeometry car_;
 
+    FrontierSearch bfs_searcher_;
 
+    std::string explore_action_name_;
+    std::string astar_planner_action_name_;
 
 public:
     config::Config config_;
+
+private:
+    int min_unknown_cells_;
+    double sparse_dis_;
+    double expect_info_radius_;
+    double initial_roi_radius_, max_roi_radius_;
 };
 
 int main(int argc, char **argv) {
     init(argc, argv, "explore_server_node");
+    ros::NodeHandle nh("~");
+
+    double vehicle_length, vehicle_width, vehicle_wheelbase, base2back;
+    double info_coeff, angle_coeff, dis_coeff, min_frontier_distance;
+    nh.param<double>("vehicle_length", vehicle_length, 4.9);
+    nh.param<double>("vehicle_width", vehicle_width, 1.95);
+    nh.param<double>("base2back", base2back, 1.09);
+    nh.param<double>("vehicle_wheelbase", vehicle_wheelbase, 2.86);
+    nh.param<double>("info_coeff", info_coeff, 1);
+    nh.param<double>("angle_coeff", angle_coeff, 1);
+    nh.param<double>("dis_coeff", dis_coeff, 1);
+    nh.param<double>("min_frontier_distance", min_frontier_distance, 3.0);
+
     config::Config cfg;
-
-    cfg.min_goal_distance = 3.0;
-    cfg.weights = config::Weights(1, 1, 1);
-    cfg.vehicle_length = 4.9;
-    cfg.vehicle_width = 2.8;
-    cfg.base2back = 1.09;
-
+    cfg.min_goal_distance = min_frontier_distance;
+    cfg.weights = config::Weights(info_coeff, angle_coeff, dis_coeff);
+    cfg.vehicle_length = vehicle_length;
+    cfg.vehicle_width = vehicle_width;
+    cfg.base2back = base2back;
+    cfg.vehicle_wheelbase = vehicle_wheelbase;
     ExploreAction explore("explore", cfg);
 
     spin();

@@ -18,7 +18,7 @@
 
 namespace frontier_exploration {
 /**
- * @brief Thread-safe implementation of a frontier-search task for an input costmap.
+ * @brief Thread-safe implementation of a frontier-search task for an input OGM.
  */
 
 
@@ -48,7 +48,9 @@ namespace frontier_exploration {
          * @brief Constructor for search task
          * @param mapData Reference to OccupancyGrid data to search.
          */
-        FrontierSearch(const nav_msgs::OccupancyGrid &mapData);
+        FrontierSearch();
+
+        void getMap(const nav_msgs::OccupancyGrid &mapData);
 
         /**
          * @brief Runs search implementation, outward from the start position
@@ -57,10 +59,10 @@ namespace frontier_exploration {
          */
         std::list<Frontier> searchFrom(unsigned int pos, hmpl::Pose2D &current_pos);
 
-        void setPolygonWidth(double r) { polygon_width_ = r; }
-
-        void setPolygonLength(double r) { polygon_length_ = r; }
-
+        int getMinFrontierNums() { return min_frontiers_nums_; }
+        void setMinFrontierNums(int  c) { min_frontiers_nums_ = c; };
+        double getPolygonRadius() { return polygon_length_ / 2; }
+        void setPolygonRadius(double c) { polygon_length_ = polygon_width_ =  2*c; };
 
     protected:
 
@@ -87,15 +89,21 @@ namespace frontier_exploration {
 
     private:
 
-        const nav_msgs::OccupancyGrid &map_;
-        const std::vector<int8_t> &map_data_;
+        nav_msgs::OccupancyGrid map_;
         unsigned int size_x_, size_y_;
         float resolution_, Xstarty_, Xstartx_;
         float search_radius, min_search_dis;
 
-        std::vector<hmpl::Vector2D<double> >  interest_polygon_area_;
+        std::vector<hmpl::Vector2D<double> >  base_interest_polygon_area_;
+        std::vector<hmpl::Vector2D<double> >  current_interest_polygon_area_;
+
         double polygon_length_;
         double polygon_width_;
+        int min_frontiers_nums_;
+
+        ros::NodeHandle nh;
+        ros::Publisher lines_pub;
+        visualization_msgs::Marker points, line;
     };
 
 }

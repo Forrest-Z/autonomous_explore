@@ -34,7 +34,7 @@ class MapBuilder
 
     void grow(const sensor_msgs::LaserScan& scan);
 
-    nav_msgs::OccupancyGrid getMap() const {return map_;}
+    nav_msgs::OccupancyGrid getMap() const {return map_base_;}
 
 
   private:
@@ -52,6 +52,23 @@ class MapBuilder
       {
         updatePointOccupancy(use_bayes, occupied, *idx, occupancy, log_odds);
       }
+    }
+
+    inline void counterClockwiseRotatePoint(double ref_x, double ref_y, double angle, double &point_x, double &point_y) {
+        double s = sin(angle);
+        double c = cos(angle);
+
+        // translate point back to origin:
+        point_x -= ref_x;
+        point_y -= ref_y;
+
+        // rotate point
+        double xnew = point_x * c - point_y * s;
+        double ynew = point_x * s + point_y * c;
+
+        // translate point back:
+        point_x = xnew + ref_x;
+        point_y = ynew + ref_y;
     }
 
     // ROS parameters.
@@ -85,6 +102,7 @@ class MapBuilder
     long int last_ymap_;  //!< Map integer y position at last map move
 
     nav_msgs::OccupancyGrid map_; //!< local map with fixed orientation
+    nav_msgs::OccupancyGrid map_base_;
     std::vector<double> log_odds_;  //!< log odds ratios for the binary Bayes filter
                                     //!< log_odd = log(p(x) / (1 - p(x)))
     map_ray_caster::MapRayCaster ray_caster_;  //!< Ray casting with cache.

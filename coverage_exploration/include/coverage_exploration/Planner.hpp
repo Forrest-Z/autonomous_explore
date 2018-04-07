@@ -236,10 +236,18 @@ namespace exploration {
         double map_solution_;
         unsigned int map_width_;
         unsigned int map_height_;
+        std::string frame_name_;
+        double border_thickness_;
+        int obs_threshold_;
+        double polygon_height_;
+        double polygon_base_length_;
+        double base2camera_length_;
 
 
+        std::string local_map_frame_name_, global_map_frame_name_;
         tfhandler::PoseHandler pose_hander_;
         ros::NodeHandle nh_;
+        ros::NodeHandlePtr n_;
         ros::Publisher cover_map_pub_;
         ros::Publisher mMarkerPub_;
 

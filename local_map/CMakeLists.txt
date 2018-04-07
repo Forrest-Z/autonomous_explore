@@ -60,11 +60,6 @@ find_package(catkin REQUIRED
 #   Message2.msg
 # )
 
-## Generate services in the 'srv' folder
-add_service_files(
-  FILES
-  SaveMap.srv
-)
 
 ## Generate actions in the 'action' folder
 # add_action_files(
@@ -73,11 +68,6 @@ add_service_files(
 #   Action2.action
 # )
 
-## Generate added messages and services with any dependencies listed here
-generate_messages(
-#   DEPENDENCIES
-#   std_msgs  # Or other packages containing msgs
-)
 
 ###################################
 ## catkin specific configuration ##
@@ -89,7 +79,8 @@ generate_messages(
 ## CATKIN_DEPENDS: catkin_packages dependent projects also need
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
-  INCLUDE_DIRS include
+  INCLUDE_DIRS
+  include
 
   # LIBRARIES local_map 
 
@@ -102,6 +93,7 @@ catkin_package(
   roscpp
   sensor_msgs
   tf
+  opt_utils
   visualization_msgs
   #  DEPENDS system_lib
 )
@@ -124,9 +116,6 @@ include_directories(
 set(SRC ${SRC} src/map_builder.cpp)
 add_executable(local_map src/local_map_node.cpp ${SRC})
 
-## Add cmake target dependencies of the executable/library
-## as an example, message headers may need to be generated before nodes
-add_dependencies(local_map local_map_generate_messages_cpp)
 
 ## Specify libraries to link a library or executable target against
 target_link_libraries(local_map ${catkin_LIBRARIES})
