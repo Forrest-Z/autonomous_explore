@@ -168,6 +168,8 @@ namespace exploration {
 
     private:
 
+        void publishFootPrint(const geometry_msgs::Pose &pose, const std::string &frame);
+
         void updateMap();
 
         void generateGoals();
@@ -242,6 +244,7 @@ namespace exploration {
         double polygon_height_;
         double polygon_base_length_;
         double base2camera_length_;
+        double left_base2camera_length_;
 
 
         std::string local_map_frame_name_, global_map_frame_name_;
@@ -250,6 +253,7 @@ namespace exploration {
         ros::NodeHandlePtr n_;
         ros::Publisher cover_map_pub_;
         ros::Publisher mMarkerPub_;
+        ros::Publisher vehicle_footprint_pub_;
 
 
     };

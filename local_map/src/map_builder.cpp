@@ -342,7 +342,12 @@ void MapBuilder::grow(const sensor_msgs::LaserScan& scan)
             int ind_y = floor((rel_y - map_base_.info.origin.position.y) / map_base_.info.resolution);
             int index_transformed = ind_y * map_base_.info.width + ind_x;
             if (ind_x > 0 && ind_x < map_base_.info.width && ind_y > 0 && ind_y < map_base_.info.height) {
-                map_base_.data[index_transformed] = map_.data[index_source] ;
+                if(map_.data[index_source] > 80 )
+                    map_base_.data[index_transformed] = 100;
+                else if(map_.data[index_source] > 0 )
+                    map_base_.data[index_transformed] = 0;
+                else
+                    map_base_.data[index_source] = -1 ;
 
             }
         }

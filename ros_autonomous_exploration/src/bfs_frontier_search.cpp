@@ -164,7 +164,7 @@ namespace frontier_exploration {
                                 // not to flood too far scope, for fast speed
                                 {
                                  hmpl::Vector2D<double> point(extend_x, extend_y);
-                                    if(util::pointInPolygon(point, current_interest_polygon_area_)) {
+                                    if(1/*util::pointInPolygon(point, current_interest_polygon_area_)*/) {
                                         bfs.push(nbr);
                                     }
                                 }
@@ -249,11 +249,10 @@ namespace frontier_exploration {
                                                        pow((double(ref_y) - double(wy)), 2.0));
                                 // not to consider too far scope, for fast speed
                                 hmpl::Vector2D<double> point(wx, wy);
-                                if (util::pointInPolygon(point, current_interest_polygon_area_)/*distance < search_radius*/) {
+                                if (1/*util::pointInPolygon(point, current_interest_polygon_area_)*//*distance < search_radius*/) {
                                     if (distance < output.min_distance) {
                                         output.min_distance = distance;
                                     }
-                                    // todo strict??
                                     if(distance > min_search_dis) {
 
                                         //add to queue for breadth first search
@@ -412,14 +411,16 @@ namespace frontier_exploration {
     }
 
     void FrontierSearch::indexToReal(const nav_msgs::OccupancyGrid &map, const size_t index, float &x, float &y) {
-        const float xcenter = (map.info.width / 2) * map.info.resolution;
-        const float ycenter = (map.info.height / 2) * map.info.resolution;
-        const size_t row = index / map.info.height;
+        const float xcenter = map.info.origin.position.x;
+//        const float ycenter = (map.info.height / 2) * map.info.resolution;
+        // warn : vehicle initial position is odom map origin, but may not be center of map !!!
+        const float ycenter = map.info.origin.position.y;
+        const size_t row = index / map.info.width;
         const size_t col = index % map.info.width;
         const float xindex = col * map.info.resolution;
         const float yindex = row * map.info.resolution;
-        x = xindex - xcenter;
-        y = yindex - ycenter;
+        x = xindex + xcenter;
+        y = yindex + ycenter;
     }
 
 }

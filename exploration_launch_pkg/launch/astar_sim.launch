@@ -1,0 +1,12 @@
+<!--  Launch file for exploration using astar for path-planning in real scenario -->
+
+<launch>
+<group ns="/exploration">
+        <include file="$(find exploration_launch_pkg)/launch/includes/sim/large_map.launch" />
+        <include file="$(find exploration_launch_pkg)/launch/includes/sim/explore_action.launch" />
+        <include file="$(find exploration_launch_pkg)/launch/includes/sim/astar_action.launch" />
+
+        <node pkg="mpc_controller" type="mpc_controller" name="mpc_controller_node" output="screen" >
+        <node pkg="rviz" type="rviz" name="rviz_exploration" args="-d $(find exploration_launch_pkg)/launch/includes/sim/rviz_config/explore_map_viz.rviz"/>
+</group>
+</launch>

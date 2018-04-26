@@ -7,7 +7,8 @@
 #include <algorithm> // sort
 #include <list>
 
-
+using namespace cv;
+using namespace std;
 using namespace exploration;
 
 typedef std::multimap<int, GridPoint> Queue;
@@ -33,12 +34,14 @@ Planner::Planner(Config config) : nh_("~"){
     nh_.param<int>("obs_threshold_", obs_threshold_, 80);
     nh_.param<double>("polygon_height", polygon_height_, 10);
     nh_.param<double>("polygon_base_length", polygon_base_length_, 8.4);
-    nh_.param<double>("base2camera_length", base2camera_length_, 3.8);
+    nh_.param<double>("base2camera_length", base2camera_length_, 1.5);
+    nh_.param<double>("left_base2camera_length", left_base2camera_length_, 0.9);
 
     n_ = ros::NodeHandlePtr(new ros::NodeHandle);
 
-    cover_map_pub_ = n_->advertise<nav_msgs::OccupancyGrid>(cover_map_topic_name, 1, true);
+    cover_map_pub_ = n_->advertise<nav_msgs::OccupancyGrid>(cover_map_topic_name, 1);
     mMarkerPub_ = n_->advertise<visualization_msgs::MarkerArray>("frontier_marker", 2);
+    vehicle_footprint_pub_ = n_->advertise<visualization_msgs::Marker>("/vehicle_in_covermap", 2);
 
 }
 
@@ -871,8 +874,47 @@ int Planner::countBlackPixels(cv::Mat mat, struct Pose pose, int vec_len_px) {
 void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
     auto start = std::chrono::system_clock::now();
     frame_name_ = map->header.frame_id;
+    GridPoint point;
     // After a map has been received
     if(initialized_) {
+        // add obstacle info
+        //todo consider situation where map size change
+        //update coverage map use traverse map
+        {
+//        auto start = std::chrono::system_clock::now();
+            bool isObstacle;
+            PointList obstacles;
+            PointList obstacleToUnknown;
+            char value = 0;
+            const GridMap &c_map = getCoverageMap();
+            unsigned int width = map->info.width;
+            unsigned int height = map->info.height;
+            for(size_t y = 0; y < height; y++) {
+                point.y = y;
+                for(size_t x = 0; x < width; x++) {
+                    point.x = x;
+                    isObstacle = false;
+                    unsigned int index = y * width + x;
+                    if(map->data[index] > obs_threshold_) {
+                        obstacles.push_back(point);
+                        isObstacle = true;
+                    }
+
+                    // todo
+                    // obs -> free, set to unknown, need to explore
+                    if(!isObstacle && c_map.getData(point, value) && value == OBSTACLE) {
+                        obstacleToUnknown.push_back(point);
+                    }
+                }
+            }
+            setCoverageMap(obstacles, OBSTACLE);
+            setCoverageMap(obstacleToUnknown, UNKNOWN);
+            ROS_DEBUG("Obstalces have been updated!");
+//        auto end = std::chrono::system_clock::now();
+//        auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
+//        ROS_INFO("Obstalces update msec: %lf", msec);
+        }
+
 //        auto start = std::chrono::system_clock::now();
         updateMap();
 //        auto end = std::chrono::system_clock::now();
@@ -882,7 +924,6 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
 //        generateGoals();
     }
 
-    GridPoint point;
     if(!initialized_) {
         map_solution_ = map->info.resolution;
         map_origin_.x = map->info.origin.position.x;
@@ -896,7 +937,7 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
             for(size_t x = 0; x < map_width_; x++) {
                 char value = UNKNOWN;
                 point.x = x;
-                unsigned int index = y * map_height_ + x;
+                unsigned int index = y * map_width_ + x;
                 if(map->data[index] > obs_threshold_) {
                     value = OBSTACLE;
                 }
@@ -930,7 +971,7 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         addSensor(poly);
 
         // left camera
-        first_pt.x =  int(base2camera_length_ / map_solution_);
+        first_pt.x =  int(left_base2camera_length_ / map_solution_);
         first_pt.y = mConfig.vehicle_width / 2 / map_solution_;
         second_pt.x = first_pt.x - polygon_base_length_ / 2 / map_solution_;
         second_pt.y = first_pt.y + polygon_height_ / map_solution_;
@@ -942,7 +983,7 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         poly.push_back(third_pt);
         addSensor(poly);
 
-        // right camera
+        /* // right camera
         first_pt.x =  int(base2camera_length_ / map_solution_);
         first_pt.y = -mConfig.vehicle_width / 2 / map_solution_;
         second_pt.x = first_pt.x - polygon_base_length_ / 2 / map_solution_;
@@ -953,7 +994,7 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         poly.push_back(first_pt);
         poly.push_back(second_pt);
         poly.push_back(third_pt);
-        addSensor(poly);
+        addSensor(poly);*/
 
         // vehicle body
         first_pt.x =  int(-mConfig.base2back/ map_solution_);
@@ -974,41 +1015,6 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         ROS_DEBUG("Planner initialization complete");
         initialized_ = true;
     }
-    //todo consider situation where map size change
-    //update coverage map use traverse map
-    {
-//        auto start = std::chrono::system_clock::now();
-        bool isObstacle;
-        PointList obstacles;
-        PointList obstacleToUnknown;
-        char value = 0;
-        const GridMap &c_map = getCoverageMap();
-        unsigned int width = map->info.width;
-        unsigned int height = map->info.height;
-        for(size_t y = 0; y < height; y++) {
-            point.y = y;
-            for(size_t x = 0; x < width; x++) {
-                point.x = x;
-                isObstacle = false;
-                unsigned int index = y * height + x;
-                if(map->data[index] > obs_threshold_) {
-                    obstacles.push_back(point);
-                    isObstacle = true;
-                }
-
-                // obs -> free, set to unknown, need to explore
-                if(!isObstacle && c_map.getData(point, value) && value == OBSTACLE) {
-                    obstacleToUnknown.push_back(point);
-                }
-            }
-        }
-        setCoverageMap(obstacles, OBSTACLE);
-        setCoverageMap(obstacleToUnknown, UNKNOWN);
-        ROS_DEBUG("Obstalces have been updated!");
-//        auto end = std::chrono::system_clock::now();
-//        auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
-//        ROS_INFO("Obstalces update msec: %lf", msec);
-    }
 
     // publish cover map
     {
@@ -1022,21 +1028,21 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         int thickness = static_cast<int>(border_thickness_ / occ_map.info.resolution);
         for (size_t y = 0; y < map_height; y++) {
             point.y = y;
-            if(y < thickness || y >= map_height - thickness ) {
+            /*if(y < thickness || y >= map_height - thickness ) {
                 for (size_t x = 0; x < map_width; x++) {
                     unsigned int index = y * map_width + x;
                     occ_map.data[index] = 100;  // black border
                 }
                 continue;
-            }
+            }*/
             for (size_t x = 0; x < map_width; x++) {
                 char value = UNKNOWN;
                 point.x = x;
                 unsigned int index = y * map_width + x;
-                if(x < thickness || x >= map_width - thickness) {
+                /*if(x < thickness || x >= map_width - thickness) {
                     occ_map.data[index] = 100;
                     continue;
-                }
+                }*/
                 if (mCoverageMap->getData(point, value) && value == OBSTACLE) {
                     occ_map.data[index] = 100;
                 } else if (mCoverageMap->getData(point, value) && value == UNKNOWN) {
@@ -1050,6 +1056,7 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
         cover_map_pub_.publish(occ_map);
     }
 
+
     auto end = std::chrono::system_clock::now();
     auto msec = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
     ROS_INFO_THROTTLE(5, "update cycle msec: %lf", msec);
@@ -1058,7 +1065,6 @@ void Planner::updateCycle(const nav_msgs::OccupancyGridConstPtr &map) {
 
 void Planner::updateMap() {
     ROS_DEBUG("Updating map");
-
     // Initialize saved positions.
     tf::StampedTransform transform;
     transform = pose_hander_.lookupPose(global_map_frame_name_, local_map_frame_name_);
@@ -1067,6 +1073,15 @@ void Planner::updateMap() {
     current_pose_.x = transform.getOrigin().x();
     current_pose_.y = transform.getOrigin().y();
     current_pose_.theta = tf::getYaw(transform.getRotation()); //[-pi, pi]
+
+
+    geometry_msgs::Pose vehicle_pose;
+    vehicle_pose.position.x = current_pose_.x ;
+    vehicle_pose.position.y = current_pose_.y;
+    vehicle_pose.orientation = tf::createQuaternionMsgFromYaw(current_pose_.theta);
+
+    publishFootPrint(vehicle_pose, global_map_frame_name_);
+
 
     // from odom relative pose to ogm
     Pose current_ogm_pose;
@@ -1080,6 +1095,242 @@ void Planner::updateMap() {
     addReading(current_ogm_pose);
 }
 
+
+void Planner::generateGoals() {
+
+    std::vector <Pose> goals_cv;
+    std::vector<int> type_array0;
+    // Copy image from the exploration map to the opencv image.
+    // TODO differentiate circle and line contour use opencv
+    // use bfs-dector results, only use cv extract line
+
+    if (1) {
+        cv::Mat mat_src(map_height_, map_width_, CV_8UC1, cv::Scalar(0));
+        char *coverage_map = mCoverageMap->getData();
+        int c = 0;
+        int x_cv = 0;
+        for (int x = 0; x < map_width_; ++x, ++x_cv) {
+            int y_cv = 0;
+            for (int y = 0; y < map_height_; ++y, ++y_cv) {
+                c = (int) coverage_map[y * mCoverageMap->getWidth() + x];
+                if (c == VISIBLE) {
+                    mat_src.at<uchar>(y_cv, x_cv) = 255;
+                } else if(c == OBSTACLE){ // OBSTACLE or UNKNOWN
+                    mat_src.at<uchar>(y_cv, x_cv) = 0;
+                } else if(c == UNKNOWN) {
+                    mat_src.at<uchar>(y_cv, x_cv) = 205;
+
+                }
+            }
+        }
+
+        int thresh = 30;
+        cv::Mat tmp, tmp_canny_output;
+        inRange(mat_src, 0, 1, tmp);
+
+        blur(mat_src, mat_src, Size(3, 3)); //滤波
+        Canny(mat_src, tmp_canny_output, thresh, thresh * 3, 3);
+
+
+
+
+//        GaussianBlur( mat_src, mat_src, Size(3,3), 0.1, 0, BORDER_DEFAULT );
+
+        //定义Canny边缘检测图像
+        Mat canny_output,canny_output_r, dst;
+        vector <vector<Point>> contours;
+        vector <Vec4i> hierarchy;
+        //利用canny算法检测边缘
+        Canny(tmp, canny_output, thresh, thresh * 3, 3);
+//        namedWindow("canny", CV_WINDOW_AUTOSIZE);
+//        flip(canny_output, canny_output_r, 0);
+//        imshow("canny", canny_output_r);
+//        moveWindow("canny", 550, 20);
+        //查找轮廓
+        findContours(canny_output, contours, hierarchy, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE, Point(0, 0));
+        drawContours(tmp, contours, -1, 255, 5);
+        bitwise_not(tmp, tmp);
+        bitwise_and(tmp, tmp_canny_output, dst);
+        findContours(dst, contours, hierarchy, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE, Point(0, 0));
+        drawContours(dst, contours, -1, 255, 1);
+
+        //计算轮廓矩
+        vector <Moments> mu(contours.size());
+        for (int i = 0; i < contours.size(); i++) {
+            mu[i] = moments(contours[i], false);
+        }
+        //计算轮廓的质心
+        vector <Point2f> mc(contours.size());
+        for (int i = 0; i < contours.size(); i++) {
+            mc[i] = Point2d(mu[i].m10 / mu[i].m00, mu[i].m01 / mu[i].m00);
+        }
+        //画轮廓及其质心并显示
+        Mat drawing = Mat::zeros(dst.size(), CV_8UC3);
+        RNG G_RNG(1234);
+
+        for (int i = 0; i < contours.size(); i++) {
+            Scalar color = Scalar(G_RNG.uniform(0, 255), G_RNG.uniform(0, 255), G_RNG.uniform(0, 255));
+            drawContours(drawing, contours, i, color, 2, 8, hierarchy, 0, Point());
+            circle(drawing, mc[i], 5, Scalar(0, 0, 255), -1, 8, 0);
+//            rectangle(drawing, boundingRect(contours.at(i)), cvScalar(0, 255, 0));
+            char tam[100];
+            sprintf(tam, "(%0.0f,%0.0f)", mc[i].x, mc[i].y);
+//            putText(drawing, tam, Point(mc[i].x, mc[i].y), FONT_HERSHEY_SIMPLEX, 0.4, cvScalar(255, 0, 255), 1);
+        }
+        flip(drawing, drawing, 0);
+        namedWindow("Contours", CV_WINDOW_AUTOSIZE);
+        imshow("Contours", drawing);
+        moveWindow("Contours", 1100, 20);
+
+        if(0) {
+            //对每个轮廓的点集 找逼近多边形
+            vector<vector<Point>> approxPoint(contours.size());
+            for (int i = 0; i < (int)contours.size(); i++)
+            {
+                approxPolyDP(contours[i], approxPoint[i], 3, true);
+            }
+
+            /******************************************绘制曲线的方式********************************************/
+            //用绘制轮廓的函数   绘制曲线
+            Mat drawImage = Mat::zeros(dst.size(), CV_8UC3);
+            for (int i = 0; i < (int)contours.size(); i++)
+            {
+                Scalar color = Scalar(G_RNG.uniform(0, 255), G_RNG.uniform(0, 255), G_RNG.uniform(0, 255));
+                // 绘制凸包
+                drawContours(drawImage, approxPoint, i,  color, 1);
+
+//                drawContours(drawImage, contours, i, Scalar(255, 255, 255), 1);
+            }
+//            flip(drawImage, drawImage, 0);
+
+            imshow("lines", drawImage);
+        } else {
+            cv::Mat mat_canny, mat_canny_bgr;
+            cv::RNG rng(0xFFFFFFFF);
+            Color col;
+            Canny(dst, mat_canny, 50, 200);
+            cvtColor(mat_canny, mat_canny_bgr, CV_GRAY2BGR);
+            std::vector<cv::Vec4f> lines;
+            // Resolution: 1 px and 180/32 degree. last two para is important!
+            HoughLinesP(mat_canny, lines, 1, CV_PI / 32, 20, 20, 5);
+            Pose vec;
+            for (size_t i = 0; i < lines.size(); i++) {
+                cv::Vec4i l = lines[i];
+                Scalar color = Scalar(G_RNG.uniform(0, 255), G_RNG.uniform(0, 255), G_RNG.uniform(0, 255));
+
+                line(mat_canny_bgr, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), color, 1, 8);
+                Point2f pt;
+                pt.x = (l[0] + l[2]) / 2;
+                pt.y = (l[1] + l[3]) / 2;
+                circle(mat_canny_bgr, pt, 5, Scalar(0, 0, 255), -1, 8, 0);
+
+                /*vec.x = (l[0] + l[2]) / 2;
+                vec.y = (l[1] + l[3]) / 2;
+                vec.theta = std::atan2(l[3] - l[1], l[2] - l[0]);
+                {
+                    int num_pixels_to_check = 10;
+                    double expl_point_orientation = vec.theta;
+                    int count_theta = countBlackPixels(mat_src, vec, num_pixels_to_check);
+                    vec.theta = expl_point_orientation + M_PI;
+                    int count_theta_pi = countBlackPixels(mat_src, vec, num_pixels_to_check);
+                    if (abs(count_theta - count_theta_pi) >= 4) { // Difference is big enough.
+                        if (count_theta_pi > count_theta) { // Use orientation with more black / unknown pixels.
+                            expl_point_orientation = expl_point_orientation + M_PI;
+                        }
+                    }
+                    vec.theta = expl_point_orientation;  //[0, 2pi]
+                }
+
+                goals_cv.push_back(vec);
+                int type = i;
+                type_array.push_back(type);*/
+            }
+            flip(mat_canny_bgr, mat_canny_bgr, 0);
+            namedWindow("lines", CV_WINDOW_AUTOSIZE);
+            cv::imshow("lines", mat_canny_bgr);
+            moveWindow("lines", 550, 20);
+
+        }
+
+            cv::waitKey(1);
+
+
+
+/*
+        cv::Mat mat_canny, mat_canny_bgr;
+        cv::RNG rng( 0xFFFFFFFF );
+        Color col;
+        Canny(mat_src, mat_canny, 50, 200);
+        cvtColor(mat_canny, mat_canny_bgr, CV_GRAY2BGR);
+        std::vector<cv::Vec4f> lines;
+        // Resolution: 1 px and 180/32 degree. last two para is important!
+        HoughLinesP(mat_canny, lines, 1, CV_PI / 32, 10, 20, 5);
+        Pose vec;
+        for( size_t i = 0; i < lines.size(); i++ )
+        {
+            cv::Vec4i l = lines[i];
+            line( mat_canny_bgr, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), col.randomColor(rng), 1, 8);
+            vec.x = (l[0] + l[2]) / 2;
+            vec.y = (l[1] + l[3]) / 2;
+            vec.theta = std::atan2(l[3] - l[1], l[2] - l[0]);
+            {
+                int num_pixels_to_check = 10;
+                double expl_point_orientation = vec.theta;
+                int count_theta = countBlackPixels(mat_src, vec, num_pixels_to_check);
+                vec.theta = expl_point_orientation + M_PI;
+                int count_theta_pi = countBlackPixels(mat_src, vec, num_pixels_to_check);
+                if (abs(count_theta - count_theta_pi) >= 4) { // Difference is big enough.
+                    if (count_theta_pi > count_theta) { // Use orientation with more black / unknown pixels.
+                        expl_point_orientation = expl_point_orientation + M_PI;
+                    }
+                }
+                vec.theta = expl_point_orientation;  //[0, 2pi]
+            }
+
+            goals_cv.push_back(vec);
+            int type = i;
+            type_array.push_back(type);
+        }
+
+        ROS_INFO("LINE number : %d", lines.size());
+        cv::imshow("source", mat_src);
+        cv::imshow("detected lines", mat_canny_bgr);
+
+        cv::waitKey(1);
+    }
+
+
+
+#endif
+
+//    publishMarkerArray(goals_cv, type_array0 );
+    auto start0 = std::chrono::system_clock::now();
+    final_goals = getCheapest(goals_cv, current_pose_, true, mConfig.vehicle_length, mConfig.vehicle_width);
+    ROS_INFO("Got %d final goals", final_goals.size());
+    auto end0 = std::chrono::system_clock::now();
+    auto msec0 = std::chrono::duration_cast<std::chrono::microseconds>(end0 - start0).count() / 1000.0;
+    ROS_INFO("find cheapest frontier cost msec: %lf", msec0);
+
+    if(type_array.size() > 0) {
+        type_array[0] = -2;
+    }
+    publishMarkerArray(final_goals, type_array );
+
+
+    if(final_goals.size() == 0) {
+        ROS_INFO("No new goals found, state is set to EXPLORATION_DONE");
+        printf("No new goals found, state is set to EXPLORATION_DONE\n");
+//        state(EXPLORATION_DONE);
+    } else {
+        printf("State back to running");
+//        state(RUNNING);
+    }*/
+
+    }
+}
+
+
+/*
 void Planner::generateGoals() {
     ROS_DEBUG("generateGoals");
     auto start = std::chrono::system_clock::now();
@@ -1118,6 +1369,8 @@ void Planner::generateGoals() {
 
 #endif
 
+
+
     std::vector<Pose> goals, final_goals;
     Pose vec;
     for(FrontierList::const_iterator frIt = goals_tmp.begin(); frIt != goals_tmp.end(); ++frIt) {
@@ -1126,6 +1379,7 @@ void Planner::generateGoals() {
             goals.push_back(vec);
         }
     }
+
 
 #ifdef CV_Dector
     std::vector<Pose> goals_cv;
@@ -1151,7 +1405,7 @@ void Planner::generateGoals() {
         Pose vec;
         for( size_t i = 0; i < lines.size(); i++ ) {
             cv::Vec4i l = lines[i];
-            line( mat_canny_bgr, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), col.randomColor(rng), 1, 8/*CV_AA*/);
+            line( mat_canny_bgr, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), col.randomColor(rng), 1, 8*//*CV_AA*//*);
             vec.x = (l[0] + l[2]) / 2;
             vec.y = (l[1] + l[3]) / 2;
             vec.theta = std::atan2(l[3] - l[1], l[2] - l[0]);
@@ -1198,7 +1452,7 @@ void Planner::generateGoals() {
         for( size_t i = 0; i < lines.size(); i++ )
         {
             cv::Vec4i l = lines[i];
-            line( mat_canny_bgr, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), col.randomColor(rng), 1, 8/*CV_AA*/);
+            line( mat_canny_bgr, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), col.randomColor(rng), 1, 8*//*CV_AA*//*);
             vec.x = (l[0] + l[2]) / 2;
             vec.y = (l[1] + l[3]) / 2;
             vec.theta = std::atan2(l[3] - l[1], l[2] - l[0]);
@@ -1255,7 +1509,7 @@ void Planner::generateGoals() {
 //        state(RUNNING);
     }
 
-}
+}*/
 
 void Planner::publishMarkerArray(const std::vector<Pose> &array, std::vector<int> type) {
     visualization_msgs::MarkerArray markersMsg;
@@ -1298,6 +1552,31 @@ void Planner::publishMarkerArray(const std::vector<Pose> &array, std::vector<int
         markersMsg.markers.push_back(marker.getMarker());
     }
     mMarkerPub_.publish(markersMsg);
+}
+
+void Planner::publishFootPrint(const geometry_msgs::Pose &pose, const std::string &frame) {
+    // displayFootprint
+    visualization_msgs::Marker marker;
+    marker.header.frame_id = frame;
+    marker.header.stamp = ros::Time();
+    marker.ns = "cover_map/footprint";
+    marker.id = 0;
+    marker.type = visualization_msgs::Marker::CUBE;
+    marker.action = visualization_msgs::Marker::ADD;
+
+    marker.scale.x = mConfig.vehicle_length;
+    marker.scale.y = mConfig.vehicle_width;
+    marker.scale.z = 2.0;
+    marker.color.a = 0.3;
+    marker.color.r = 0.0;
+    marker.color.g = 1.0;
+    marker.color.b = 0.0;
+    marker.frame_locked = true;
+
+    marker.pose = pose;
+
+    vehicle_footprint_pub_.publish(marker);
+
 }
 
 

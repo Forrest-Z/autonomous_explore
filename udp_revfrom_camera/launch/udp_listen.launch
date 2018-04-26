@@ -1,0 +1,8 @@
+<launch>
+	<node name="udp_revfrom_camera_node" pkg="udp_revfrom_camera" type="udp_revfrom_camera_node" output="screen" >
+		<param name="local_ip" value= "192.168.1.11" />
+		<param name="local_port" value="9999" />
+		<param name="send_object_send_topic_name" value="/object_status" />
+	</node>
+
+</launch>

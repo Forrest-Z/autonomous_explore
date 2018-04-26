@@ -4,7 +4,7 @@
 #include <tf/transform_listener.h>
 
 #define CONTROL_LOCAL_PATH
-#define PLAN_IN_LOCAL_MAP
+//#define PLAN_IN_LOCAL_MAP
 #define DEBUG 1
 
 enum class STATUS : uint8_t
